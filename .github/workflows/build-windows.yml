@@ -1,0 +1,58 @@
+# Автосборка Windows-дистрибутива. Запускается на push в main, на тег v* (создаёт Release) и вручную.
+name: build-windows
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest -q
+
+  build-windows:
+    runs-on: windows-latest
+    needs: test-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      - run: python -m pytest -q tests/test_protocol.py tests/test_store.py tests/test_files.py
+      - name: PyInstaller
+        run: pyinstaller --noconfirm --clean LocalClass.spec
+      - name: Smoke-test exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\LocalClass\localclass-node.exe -ArgumentList "--device CI --port 5001 --data run\CI --no-repl --no-mdns" -PassThru
+          Start-Sleep 8
+          if ($p.HasExited) { throw "localclass-node.exe завершился с кодом $($p.ExitCode)" }
+          Stop-Process $p
+          Get-ChildItem run\CI\logs
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $v = python -c "import localclass; print(localclass.__version__)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\LocalClass.iss
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\LocalClass\* -DestinationPath dist\LocalClass-portable.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalClass-windows
+          path: |
+            dist/*.exe
+            dist/LocalClass-portable.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/LocalClass-portable.zip
