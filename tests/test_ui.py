@@ -7,9 +7,13 @@ import time
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication   # noqa: E402
+# Qt требует системные библиотеки (libEGL, libGL, libxkbcommon). Там, где их нет — например, на голом
+# CI-раннере, — тесты интерфейса пропускаются, а не роняют весь прогон.
+try:
+    from PySide6.QtWidgets import QApplication
+except ImportError as e:   # noqa: BLE001
+    pytest.skip(f"Qt недоступен в этом окружении: {e}", allow_module_level=True)
 
 from localclass.config import NodeConfig, Settings   # noqa: E402
 from localclass.core.node import Node                # noqa: E402
