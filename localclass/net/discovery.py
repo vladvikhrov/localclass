@@ -94,6 +94,8 @@ class Discovery:
             "session_id": self.node.session_id,
             "session_code": s["code"] if s else "",
             "session_name": s["name"] if s else "",
+            "session_teacher": self.node.session_teacher_name() if s else "",
+            "session_members": self.node.session_member_count() if s else 0,
             "display_name": self.node.display_name,
             "port": self.node.mesh.listen_port,
             "addresses": self.node.local_addresses(),
@@ -156,6 +158,8 @@ class Discovery:
             session_id=p.get("session_id") or None, public_key=str(p.get("public_key", "")),
             display_name=str(p.get("display_name", ""))[:64], session_code=str(p.get("session_code", "")),
             session_name=str(p.get("session_name", ""))[:64], source=source, last_seen=time.time(),
+            session_teacher=str(p.get("session_teacher", ""))[:64],
+            session_members=int(p.get("session_members") or 0),
         )
         self.node.on_peer_discovered(info)
 
@@ -187,7 +191,7 @@ class Discovery:
         p = self.packet()
         return {"did": p["device_id"], "pk": p["public_key"], "sid": p["session_id"] or "",
                 "code": p["session_code"], "sname": p["session_name"], "dn": p["display_name"],
-                "v": str(PROTOCOL_VERSION)}
+                "tname": p["session_teacher"], "mem": str(p["session_members"]), "v": str(PROTOCOL_VERSION)}
 
     async def _mdns_resolve(self, name: str, AsyncServiceInfo) -> None:
         try:
@@ -204,7 +208,9 @@ class Discovery:
             addresses = info.parsed_addresses()
             self._seen(did, addresses, {"port": info.port, "session_id": props.get("sid") or None,
                                         "public_key": props.get("pk", ""), "display_name": props.get("dn", ""),
-                                        "session_code": props.get("code", ""), "session_name": props.get("sname", "")},
+                                        "session_code": props.get("code", ""), "session_name": props.get("sname", ""),
+                                        "session_teacher": props.get("tname", ""),
+                                        "session_members": int(props.get("mem") or 0)},
                        "mdns")
         except Exception as e:  # noqa: BLE001
             log.debug("mdns resolve %s: %s", name, e)

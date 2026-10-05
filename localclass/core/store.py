@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .events import Event, EventType, new_id
+from .session import SEEN_TTL
 
 log = logging.getLogger("localclass.core.store")
 
@@ -146,7 +147,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at         REAL NOT NULL,
     duration           INTEGER NOT NULL,
     teacher_public_key TEXT NOT NULL DEFAULT '',
+    teacher_pin_hash   TEXT NOT NULL DEFAULT '',
     teacher_id         TEXT NOT NULL DEFAULT '',
+    teacher_name       TEXT NOT NULL DEFAULT '',
     closed_at          REAL,
     joined_at          REAL NOT NULL DEFAULT 0
 );
@@ -174,11 +177,14 @@ CREATE TABLE IF NOT EXISTS chunk_hashes (
     hash        TEXT NOT NULL,
     PRIMARY KEY (transfer_id, chunk_index)
 );
-CREATE TABLE IF NOT EXISTS seen_sessions (      -- сессии, замеченные в discovery (для подключения по коду)
-    session_id TEXT PRIMARY KEY,
-    name       TEXT NOT NULL DEFAULT '',
-    code       TEXT NOT NULL DEFAULT '',
-    last_seen  REAL NOT NULL
+CREATE TABLE IF NOT EXISTS seen_sessions (      -- сессии, замеченные в discovery (карточки на экране входа)
+    session_id   TEXT PRIMARY KEY,
+    name         TEXT NOT NULL DEFAULT '',
+    code         TEXT NOT NULL DEFAULT '',
+    teacher_name TEXT NOT NULL DEFAULT '',
+    members      INTEGER NOT NULL DEFAULT 0,
+    closed       INTEGER NOT NULL DEFAULT 0,   -- получили SESSION_CLOSED / узнали о закрытии
+    last_seen    REAL NOT NULL
 );
 """
 
@@ -221,7 +227,23 @@ class Store:
         self.db = sqlite3.connect(str(db_file), check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.execute("INSERT OR IGNORE INTO lamport (device_id, lamport) VALUES (?, 0)", (device_id,))
+
+    def _migrate(self) -> None:
+        """Добавляет колонки, появившиеся после первой версии схемы (базы обновляются на месте)."""
+        added = [
+            ("sessions", "teacher_pin_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("sessions", "teacher_name", "TEXT NOT NULL DEFAULT ''"),
+            ("seen_sessions", "teacher_name", "TEXT NOT NULL DEFAULT ''"),
+            ("seen_sessions", "members", "INTEGER NOT NULL DEFAULT 0"),
+            ("seen_sessions", "closed", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for table, column, decl in added:
+            cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                log.info("миграция базы: %s.%s добавлена", table, column)
 
     def close(self) -> None:
         with self._lock:
@@ -458,17 +480,27 @@ class Store:
                 self.db.execute("UPDATE channels SET closed=1 WHERE session_id=? AND name=?", (sid, name))
             elif t == EventType.SESSION_CREATED:
                 self.db.execute(
-                    "INSERT INTO sessions (session_id, name, code, created_at, duration, teacher_public_key, teacher_id, joined_at)"
-                    " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET name=excluded.name, code=excluded.code,"
+                    "INSERT INTO sessions (session_id, name, code, created_at, duration, teacher_public_key,"
+                    " teacher_pin_hash, teacher_id, teacher_name, joined_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+                    " ON CONFLICT(session_id) DO UPDATE SET name=excluded.name, code=excluded.code,"
                     " created_at=excluded.created_at, duration=excluded.duration, teacher_public_key=excluded.teacher_public_key,"
-                    " teacher_id=excluded.teacher_id",
+                    " teacher_pin_hash=excluded.teacher_pin_hash, teacher_id=excluded.teacher_id,"
+                    " teacher_name=excluded.teacher_name",
                     (sid, str(p.get("name", "")), str(p.get("code", "")), float(p.get("created_at", ev.timestamp)),
-                     int(p.get("duration", 0)), str(p.get("teacher_public_key", "")), ev.device_id, time.time()))
+                     int(p.get("duration", 0)), str(p.get("teacher_public_key", "")), str(p.get("teacher_pin_hash", "")),
+                     ev.device_id, str(p.get("teacher_name", ""))[:64], time.time()))
                 self.db.execute(
                     "INSERT OR IGNORE INTO channels (session_id, name, title, created_by, lamport) VALUES (?,?,?,?,?)",
                     (sid, "general", "Общий", ev.device_id, ev.lamport))
+                if self._tombstoned(sid, "session", sid):
+                    self.db.execute("UPDATE sessions SET closed_at=COALESCE(closed_at, ?) WHERE session_id=?",
+                                    (ev.timestamp, sid))
+                    self.db.execute("UPDATE seen_sessions SET closed=1 WHERE session_id=?", (sid,))
             elif t == EventType.SESSION_CLOSED:
+                # tombstone, чтобы закрытая сессия не «ожила» из пришедшего позже SESSION_CREATED
+                self._tombstone(ev, "session", sid)
                 self.db.execute("UPDATE sessions SET closed_at=? WHERE session_id=?", (ev.timestamp, sid))
+                self.db.execute("UPDATE seen_sessions SET closed=1 WHERE session_id=?", (sid,))
             elif t == EventType.PERMISSIONS_UPDATED:
                 target = str(p.get("device_id", ""))
                 if target:
@@ -616,17 +648,39 @@ class Store:
                 "INSERT OR IGNORE INTO channels (session_id, name, title, created_by, lamport) VALUES (?,?,?,?,0)",
                 (session_id, "general", "Общий", ""))
 
-    def seen_session(self, session_id: str, name: str, code: str) -> None:
+    def seen_session(self, session_id: str, name: str, code: str, teacher_name: str = "", members: int = 0) -> None:
+        closed = 1 if self.is_session_closed(session_id) else 0
         with self._lock:
             self.db.execute(
-                "INSERT INTO seen_sessions (session_id, name, code, last_seen) VALUES (?,?,?,?) "
-                "ON CONFLICT(session_id) DO UPDATE SET name=excluded.name, code=excluded.code, last_seen=excluded.last_seen",
-                (session_id, name, code, time.time()))
+                "INSERT INTO seen_sessions (session_id, name, code, teacher_name, members, closed, last_seen)"
+                " VALUES (?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET name=excluded.name, code=excluded.code,"
+                " teacher_name=CASE WHEN excluded.teacher_name<>'' THEN excluded.teacher_name ELSE seen_sessions.teacher_name END,"
+                " members=excluded.members, closed=MAX(seen_sessions.closed, excluded.closed), last_seen=excluded.last_seen",
+                (session_id, name, code, teacher_name, int(members), closed, time.time()))
 
-    def seen_sessions(self, max_age: float = 120.0) -> list[dict]:
+    def seen_sessions(self, max_age: float = SEEN_TTL, include_closed: bool = False) -> list[dict]:
+        """Активные сессии в сети: TTL по последнему broadcast (по умолчанию 15 с) и без закрытых."""
+        q = "SELECT * FROM seen_sessions WHERE last_seen>?"
+        if not include_closed:
+            q += " AND closed=0"
         with self._lock:
-            return [dict(r) for r in self.db.execute(
-                "SELECT * FROM seen_sessions WHERE last_seen>? ORDER BY last_seen DESC", (time.time() - max_age,))]
+            self.db.execute("DELETE FROM seen_sessions WHERE last_seen<?", (time.time() - 3600,))
+            return [dict(r) for r in self.db.execute(q + " ORDER BY last_seen DESC", (time.time() - max_age,))]
+
+    def mark_session_closed(self, session_id: str, when: float | None = None) -> None:
+        """Локальная отметка закрытия (таймаут длительности или решение преподавателя)."""
+        with self._lock:
+            self.db.execute("UPDATE sessions SET closed_at=COALESCE(closed_at, ?) WHERE session_id=?",
+                            (when or time.time(), session_id))
+            self.db.execute("UPDATE seen_sessions SET closed=1 WHERE session_id=?", (session_id,))
+
+    def is_session_closed(self, session_id: str) -> bool:
+        with self._lock:
+            if self.db.execute("SELECT 1 FROM tombstones WHERE session_id=? AND object_type='session' AND object_id=?",
+                               (session_id, session_id)).fetchone():
+                return True
+            r = self.db.execute("SELECT closed_at FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+            return bool(r and r[0])
 
     # ------------------------------------------------------------------ transfers (resume из SQLite, ТЗ 12.4)
     def upsert_transfer(self, t: dict) -> None:

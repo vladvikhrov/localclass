@@ -49,6 +49,8 @@ class PeerInfo:
     display_name: str = ""
     session_code: str = ""
     session_name: str = ""
+    session_teacher: str = ""
+    session_members: int = 0
     source: str = ""
     last_seen: float = 0.0
     failures: int = 0
@@ -186,6 +188,10 @@ class Mesh:
             cur.session_code = info.session_code
         if info.session_name:
             cur.session_name = info.session_name
+        if info.session_teacher:
+            cur.session_teacher = info.session_teacher
+        if info.session_members:
+            cur.session_members = info.session_members
         cur.source = info.source or cur.source
         cur.last_seen = max(cur.last_seen, info.last_seen)
 

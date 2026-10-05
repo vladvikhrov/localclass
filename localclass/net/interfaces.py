@@ -86,8 +86,60 @@ def interface_key(iface: Interface) -> str:
     return f"{iface.name}|{iface.ip}"
 
 
+def default_route_ip() -> str:
+    """IP интерфейса, через который идёт маршрут по умолчанию (шлюз).
+
+    UDP-сокет только «подключается» к внешнему адресу — ни одного пакета не отправляется, интернет не нужен:
+    ядро само выбирает исходящий интерфейс по таблице маршрутизации. Работает одинаково на Windows и Linux.
+    """
+    for probe in ("8.8.8.8", "192.168.1.1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(0.3)
+                s.connect((probe, 9))
+                ip = s.getsockname()[0]
+            if ip and not ip.startswith("0."):
+                return ip
+        except OSError:
+            continue
+    return ""
+
+
+def preferred_interface(interfaces: list[Interface] | None = None) -> Interface | None:
+    """Интерфейс со шлюзом по умолчанию — то, что приложение выбирает автоматически."""
+    ifaces = interfaces if interfaces is not None else list_interfaces()
+    ip = default_route_ip()
+    if ip:
+        for i in ifaces:
+            if i.ip == ip:
+                return i
+    real = [i for i in ifaces if not i.loopback and not i.hint]
+    return real[0] if real else (ifaces[0] if ifaces else None)
+
+
+def virtual_interface_keys(interfaces: list[Interface] | None = None) -> list[str]:
+    """Ключи виртуальных адаптеров (VirtualBox, Docker, Hyper-V, VMware, WSL, VPN) — мусор для discovery."""
+    ifaces = interfaces if interfaces is not None else list_interfaces()
+    preferred = preferred_interface(ifaces)
+    out = []
+    for i in ifaces:
+        if i.loopback or (preferred and i.ip == preferred.ip):
+            continue
+        if i.hint in ("VirtualBox", "Docker", "VMware", "Hyper-V", "WSL") or i.hint.startswith("VPN"):
+            out.append(interface_key(i))
+    return out
+
+
 def local_addresses(include_loopback: bool = False, disabled: list[str] | None = None) -> list[str]:
-    return [i.ip for i in list_interfaces(include_loopback, disabled) if i.enabled]
+    """Включённые адреса; первым — адрес интерфейса со шлюзом по умолчанию (наиболее вероятно рабочий).
+
+    Это порядок предпочтения для discovery, а не утверждение: рабочий адрес подтверждается
+    только фактически установленным соединением (ТЗ 5.3).
+    """
+    ifaces = [i for i in list_interfaces(include_loopback, disabled) if i.enabled]
+    gw = default_route_ip()
+    ifaces.sort(key=lambda i: (i.ip != gw, i.loopback, bool(i.hint)))
+    return [i.ip for i in ifaces]
 
 
 def hostname() -> str:

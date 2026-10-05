@@ -56,6 +56,9 @@ class Settings:
     current_session_id: str | None = None
     manual_peers: list[str] = field(default_factory=list)   # "host:port"
     advanced_logs: bool = False
+    download_dir: str = ""              # пусто → storage/files внутри данных приложения
+    theme: str = "light"                # light | dark
+    interfaces_configured: bool = False  # авто-выбор интерфейсов уже выполнялся
     limits: Limits = field(default_factory=Limits)
 
     @classmethod
@@ -91,9 +94,10 @@ class Settings:
 
 @dataclass
 class Paths:
-    """%APPDATA%/LocalClass/... (ТЗ 11.1)."""
+    """%APPDATA%/LocalClass/... (ТЗ 11.1). files может быть перенаправлен в папку пользователя."""
 
     root: Path
+    download_dir: str = ""
 
     @property
     def config(self) -> Path: return self.root / "config"
@@ -110,7 +114,14 @@ class Paths:
     @property
     def incoming(self) -> Path: return self.root / "storage" / "incoming"
     @property
-    def files(self) -> Path: return self.root / "storage" / "files"
+    def files(self) -> Path:
+        if self.download_dir:
+            return Path(self.download_dir).expanduser()
+        return self.root / "storage" / "files"
+
+    def set_download_dir(self, path: str) -> None:
+        self.download_dir = str(path or "")
+        self.files.mkdir(parents=True, exist_ok=True)
     @property
     def logs(self) -> Path: return self.root / "logs"
 

@@ -91,9 +91,27 @@ Vector clock = `{device_id: непрерывный префикс device_seq}` �
 
 ```json
 {"protocol_version": 1, "device_id": "...", "public_key": "...", "session_id": "...", "session_code": "K7F2-X9",
- "session_name": "...", "display_name": "...", "port": 45821, "addresses": ["192.168.1.25"]}
+ "session_name": "...", "session_teacher": "Мария Иванова", "session_members": 7,
+ "display_name": "...", "port": 45821, "addresses": ["192.168.1.25"]}
 ```
-mDNS: сервис `_localclass._tcp.local.`, TXT: `did, pk, sid, code, sname, dn, v`.
+`session_teacher` и `session_members` наполняют карточку урока на экране входа. Карточка живёт **15 секунд**
+с момента последнего пакета (TTL), поэтому исчезнувший из сети урок пропадает из списка сам.
+
+mDNS: сервис `_localclass._tcp.local.`, TXT: `did, pk, sid, code, sname, tname, mem, dn, v`.
+
+## 7a. Жизненный цикл урока
+
+`SESSION_CREATED.payload` помимо полей раздела 13 ТЗ несёт `teacher_pin_hash` =
+`SHA-256("localclass-pin:" + session_id + ":" + PIN)` и `teacher_name`. Сам PIN по сети не передаётся.
+Узел, знающий PIN, проверяет хеш локально и объявляет себя преподавателем обычным `USER_JOINED` с
+`role: "teacher"` — это cooperative security (ТЗ 4.3), как и прежде.
+
+`SESSION_CLOSED.payload.reason` = `teacher` (завершил вручную) или `expired` (истекла длительность).
+Применение события ставит **tombstone объекта типа `session`**, поэтому пришедший позже `SESSION_CREATED`
+не «воскрешает» урок. Получив `SESSION_CLOSED` для своей сессии, узел закрывает соединения, обнуляет
+`current_session_id` и уходит на экран входа; для чужой — только помечает урок закрытым, чтобы его карточка
+больше не появлялась. Независимо от событий каждый узел раз в 3 секунды проверяет срок жизни урока
+(`created_at + duration`) и закрывает его сам — это страхует от застревания, если `SESSION_CLOSED` не дошёл.
 
 ## 8. Границы значений
 
