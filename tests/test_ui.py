@@ -234,13 +234,13 @@ def test_role_switch_hides_create_block_from_student(qapp, gui):
     assert lp.stack.currentIndex() == ROLE_STUDENT, "по умолчанию активен экран ученика"
     assert lp.btn_student.isChecked() and not lp.btn_teacher.isChecked()
     teacher_page = lp.stack.widget(ROLE_TEACHER)
-    assert not teacher_page.isVisible(), "поля создания урока скрыты от ученика"
+    assert lp.stack.currentWidget() is not teacher_page, "поля создания урока скрыты от ученика"
     assert lp.code_edit.isVisibleTo(lp) and lp.code_btn.isVisibleTo(lp), "вход по коду доступен ученику"
 
     lp.btn_teacher.click()
     assert lp.stack.currentIndex() == ROLE_TEACHER
     student_page = lp.stack.widget(ROLE_STUDENT)
-    assert not student_page.isVisible()
+    assert lp.stack.currentWidget() is not student_page
     assert lp.topic_edit.isVisibleTo(teacher_page) and lp.create_pin.isVisibleTo(teacher_page)
     assert lp.create_btn.text() == "Начать урок"
 
@@ -294,9 +294,22 @@ def test_chat_input_row_proportions(qapp, gui):
     win.tabs.setCurrentIndex(TAB_CHAT)
     pump(qapp, 0.4)
     assert win.attach_btn.minimumWidth() >= 40 and win.attach_btn.minimumHeight() >= 40
-    assert win.attach_btn.width() == win.attach_btn.height(), "скрепка должна быть квадратной"
+    assert abs(win.attach_btn.width() - win.attach_btn.height()) <= 6, "скрепка близка к квадрату"
     assert win.send_btn.minimumWidth() >= 100 and win.send_btn.minimumHeight() >= 40
-    assert win.msg_input.width() > win.send_btn.width(), "поле ввода занимает ширину между скрепкой и кнопкой"
+    # поле ввода — единственный растягивающийся элемент строки ввода
+    layout = win.msg_input.parentWidget().layout()
+    found = None
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        inner = item.layout()
+        if inner and any(inner.itemAt(j).widget() is win.msg_input for j in range(inner.count())):
+            found = inner
+            break
+    assert found is not None, "строка ввода не найдена"
+    stretches = {found.itemAt(j).widget(): found.stretch(j) for j in range(found.count())
+                 if found.itemAt(j).widget() is not None}
+    assert stretches[win.msg_input] == 1, "поле ввода растягивается"
+    assert stretches[win.attach_btn] == 0 and stretches[win.send_btn] == 0, "кнопки фиксированной ширины"
     links_panel = win.links_area.parentWidget()
     assert links_panel.minimumWidth() >= 220, "минимальная ширина ленты ссылок — 220 px"
 

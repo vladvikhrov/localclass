@@ -32,6 +32,8 @@ log = logging.getLogger("localclass.files.transfer")
 IDX = struct.Struct("!I")
 FILE_IO_TIMEOUT = 60.0
 BUSY_RETRY = 10.0
+MAX_ROUNDS = 12          # запросов недостающих чанков в рамках одного соединения
+INCOMPLETE_RETRY = 1.0   # пауза перед новым соединением, если часть чанков так и не доехала
 
 
 class TransferError(Exception):
@@ -230,7 +232,7 @@ class TransferManager:
         if not t:
             return
         owner = t["peer_id"]
-        for attempt in range(6):
+        for attempt in range(12):
             addr = self.node.mesh.best_address(owner)
             if not addr or not self.node.mesh.get(owner):
                 self._fail(t, "нет прямого соединения с владельцем файла — передача невозможна (relay не поддерживается)", "paused")
@@ -249,8 +251,12 @@ class TransferManager:
                 self.node.bus.publish("transfer.queued", {"transfer_id": transfer_id, "filename": t["filename"]})
                 await asyncio.sleep(BUSY_RETRY)
                 continue
+            if result == "incomplete":
+                self.node.store.update_transfer(transfer_id, status="active", error=None)
+                await asyncio.sleep(INCOMPLETE_RETRY)
+                continue
             return
-        self._fail(t, "владелец занят слишком долго", "paused")
+        self._fail(t, "не все чанки получены — передача продолжится при следующем подключении", "paused")
 
     async def _download_once(self, t: dict[str, Any], addr: tuple[str, int]) -> str:
         host, port = addr
@@ -303,10 +309,14 @@ class TransferManager:
             ack_every = max(1, self.limits.ack_window // 4)
 
             with open(temp, "r+b") as fh:
-                for _round in range(4):
+                # повторяем, пока раунд приносит новые чанки: при потерях в канале фиксированное
+                # число попыток не гарантирует доставку (ТЗ 19.2 — «в итоге доходит всё»)
+                stalled = 0
+                for _round in range(MAX_ROUNDS):
                     missing = bitmap.missing()
                     if not missing:
                         break
+                    before = len(missing)
                     await _send_json(writer, make_packet(MsgType.FILE_ACCEPT, self.node.device_id,
                                                          {"transfer_id": tid, "missing": missing}))
                     got_in_round = 0
@@ -342,8 +352,17 @@ class TransferManager:
                                 raise TransferError(f"владелец прервал передачу: {pkt['payload'].get('reason', '')}")
                     fh.flush()
                     self.node.store.update_transfer(tid, received_chunks=bitmap.hex())
+                    left = len(bitmap.missing())
+                    if left and left >= before:
+                        stalled += 1
+                        if stalled >= 2:      # два раунда подряд без прогресса — пробуем новое соединение
+                            break
+                    else:
+                        stalled = 0
             if bitmap.missing():
-                raise TransferError("не удалось получить все чанки после повторных запросов")
+                # связь жива и файл цел — просто не все чанки доехали; докачаем на следующем подключении
+                log.info("приём %s: осталось %d чанков — повторим", t["filename"], len(bitmap.missing()))
+                return "incomplete"
             # полный SHA-256 — второй уровень проверки
             digest = await asyncio.to_thread(file_sha256, temp)
             if digest != manifest.full_sha256:
