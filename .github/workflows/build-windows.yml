@@ -26,6 +26,8 @@ jobs:
   build-windows:
     runs-on: windows-latest
     needs: test-linux
+    permissions:
+      contents: write      # нужно, чтобы шаг Release мог создать релиз и приложить установщик
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
