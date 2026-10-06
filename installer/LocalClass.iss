@@ -38,7 +38,9 @@ Name: "autostart"; Description: "Запускать LocalClass при входе
 Name: "firewall"; Description: "Разрешить LocalClass в брандмауэре Windows (TCP {#TcpPort}, UDP {#UdpPort})"; GroupDescription: "Сеть:"
 
 [Files]
-Source: "..\dist\LocalClass\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; localclass-node.exe — консольный узел для разработки и автотестов, обычному пользователю не нужен
+Source: "..\dist\LocalClass\*"; DestDir: "{app}"; Excludes: "localclass-node.exe"; \
+  Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"

@@ -1,8 +1,13 @@
-"""Главное окно LocalClass.
+"""Главное окно LocalClass (ТЗ v1.3).
 
-Экран «Урок» — QStackedWidget с двумя режимами: вход (выбор урока / создание) и активный урок.
-Любое действие пользователя превращается в команду ядра через Bridge, любое изменение состояния
-приходит событием шины (ТЗ 3.3): окно не обращается ни к сети, ни к базе напрямую на запись.
+Компоновка: только layout'ы, растяжения и минимальные размеры — ни setGeometry, ни фиксированных
+размеров контейнеров, поэтому интерфейс не ломается при системном масштабе 125 % и 150 %.
+Каждая вкладка верхнего уровня обёрнута в QScrollArea: на экране 1366×768 содержимое не сжимается,
+а получает вертикальную прокрутку.
+
+Экран «Урок» разделён переключателем ролей: «Я Ученик» (вход по карточке или коду) и «Я Преподаватель»
+(создание урока, подключение к идущему уроку по PIN). Любое действие пользователя превращается в команду
+ядра через Bridge, любое изменение состояния приходит событием шины bus.py (ТЗ 3.3).
 """
 from __future__ import annotations
 
@@ -15,10 +20,10 @@ from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGroupBox,
-                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+                               QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QScrollArea, QSpinBox, QSplitter, QStackedWidget, QSystemTrayIcon, QTableWidget,
+                               QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QSystemTrayIcon, QTableWidget,
                                QTableWidgetItem, QTabWidget, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
 
 from ... import __version__
@@ -27,18 +32,19 @@ from ...core.store import Bitmap
 from .bridge import Bridge
 from .qr import QRDialog
 from .style import link_color, qss, rich_text_css
-from .widgets import (CollapsibleBox, DropZone, LinkCard, SessionCard, Toast, ask_files, button, cell_widget,
-                      fmt_eta, fmt_size, fmt_speed, label)
+from .widgets import (DropZone, LinkCard, Section, SessionCard, Toast, ask_files, button, card, cell_widget,
+                      divider_with_text, fit_widget_column, fmt_eta, fmt_size, fmt_speed, label, scrollable)
 
 STATUS_RU = {"connected": "на связи", "discovered": "обнаружен", "unreachable": "недоступен",
              "blocked": "заблокирован", "conflict": "⚠ ключ изменился", "other_session": "другой урок"}
 URL_RE = re.compile(r"(https?://[^\s<>\"']+)")
 TAB_SESSION, TAB_CHAT, TAB_FILES, TAB_PEERS, TAB_DIAG, TAB_LOGS, TAB_SETTINGS = range(7)
+ROLE_STUDENT, ROLE_TEACHER = 0, 1
 
 
 def app_icon() -> QIcon:
     pm = QPixmap(64, 64)
-    pm.fill(QColor("#2b6cb0"))
+    pm.fill(QColor("#0969da"))
     p = QPainter(pm)
     p.setPen(QColor("white"))
     f = p.font()
@@ -51,13 +57,20 @@ def app_icon() -> QIcon:
 
 
 class MessageInput(QTextEdit):
-    """Enter — отправить, Shift+Enter — перевод строки."""
+    """Enter — отправить, Shift+Enter — перевод строки. Высота растёт с текстом, но ограничена сверху."""
 
     def __init__(self, on_send, parent=None):
         super().__init__(parent)
         self.on_send = on_send
-        self.setMaximumHeight(92)
         self.setPlaceholderText("Сообщение…  (Enter — отправить, Shift+Enter — новая строка)")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.setMinimumHeight(44)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.document().documentLayout().documentSizeChanged.connect(self._fit_height)
+
+    def _fit_height(self) -> None:
+        doc = int(self.document().size().height()) + 2 * int(self.frameWidth()) + 10
+        self.setMaximumHeight(max(44, min(doc, 150)))
 
     def keyPressEvent(self, e) -> None:
         if e.key() in (Qt.Key_Return, Qt.Key_Enter) and not (e.modifiers() & Qt.ShiftModifier):
@@ -68,7 +81,7 @@ class MessageInput(QTextEdit):
 
 # ======================================================================== экран входа
 class LoginPage(QWidget):
-    """Вне урока: имя, список уроков в сети с кнопками [Присоединиться], вход по коду, создание урока."""
+    """Вне урока: переключатель «Я Ученик» / «Я Преподаватель» и соответствующий экран."""
 
     def __init__(self, win: "MainWindow"):
         super().__init__()
@@ -78,136 +91,179 @@ class LoginPage(QWidget):
         self._joining = False
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
+        root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(14)
 
-        head = QFrame()
-        head.setProperty("card", "true")
-        hl = QHBoxLayout(head)
-        hl.setContentsMargins(18, 14, 18, 14)
-        hl.setSpacing(14)
-        name_col = QVBoxLayout()
-        name_col.setSpacing(4)
-        name_col.addWidget(label("Ваше имя", "h2"))
-        name_col.addWidget(label("его увидят участники урока — заполните перед подключением", "muted"))
-        hl.addLayout(name_col)
+        # ---------- переключатель ролей
+        switch_row = QHBoxLayout()
+        switch_row.setSpacing(10)
+        self.role_group = QButtonGroup(self)
+        self.role_group.setExclusive(True)
+        self.btn_student = button("Я Ученик", "roleTab", min_height=44)
+        self.btn_teacher = button("Я Преподаватель", "roleTab", min_height=44)
+        for idx, b in ((ROLE_STUDENT, self.btn_student), (ROLE_TEACHER, self.btn_teacher)):
+            b.setCheckable(True)
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.role_group.addButton(b, idx)
+            switch_row.addWidget(b, 1)
+        self.btn_student.setChecked(True)
+        self.role_group.idClicked.connect(self._on_role_switch)
+        root.addLayout(switch_row)
+
+        # ---------- общее поле имени
+        name_card, name_lay = card(margins=(16, 12, 16, 12), spacing=6)
+        name_lay.addWidget(label("Ваше имя", "h2"))
+        name_lay.addWidget(label("его увидят участники урока — заполните перед входом", "muted", wrap=True))
         self.name_edit = QLineEdit(self.node.display_name)
-        self.name_edit.setProperty("role", "big")
+        self.name_edit.setObjectName("bigInput")
         self.name_edit.setPlaceholderText("Например: Иван Петров")
-        self.name_edit.setMinimumWidth(280)
+        self.name_edit.setMinimumHeight(40)
         self.name_edit.editingFinished.connect(self._save_name)
-        hl.addWidget(self.name_edit, 1)
-        root.addWidget(head)
+        name_lay.addWidget(self.name_edit)
+        root.addWidget(name_card)
 
-        columns = QHBoxLayout()
-        columns.setSpacing(14)
-        root.addLayout(columns, 1)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_student_page())
+        self.stack.addWidget(self._build_teacher_page())
+        root.addWidget(self.stack, 1)
 
-        # ---------------- блок ученика
-        student = QFrame()
-        student.setProperty("card", "true")
-        sl = QVBoxLayout(student)
-        sl.setContentsMargins(18, 16, 18, 16)
-        sl.setSpacing(10)
-        sl.addWidget(label("Уроки в вашей сети", "h2"))
-        self.hint = label("Ищем уроки в сети… Попросите преподавателя создать урок.", "muted", wrap=True)
-        sl.addWidget(self.hint)
+    # ---------------- экран ученика
+    def _build_student_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
 
-        self.cards_area = QScrollArea()
-        self.cards_area.setWidgetResizable(True)
-        self.cards_area.setFrameShape(QFrame.NoFrame)
-        self.cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.cards_area.setMinimumHeight(240)
+        lessons, ll = card(spacing=10)
+        ll.addWidget(label("Доступные уроки в сети", "h2"))
+        self.hint = label("Ищем уроки в сети… Попросите преподавателя начать урок.", "muted", wrap=True)
+        ll.addWidget(self.hint)
         holder = QWidget()
         self.cards_layout = QVBoxLayout(holder)
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
         self.cards_layout.setSpacing(10)
         self.cards_layout.addStretch()
-        self.cards_area.setWidget(holder)
-        sl.addWidget(self.cards_area, 1)
+        self.cards_area = scrollable(holder, plain=True)
+        self.cards_area.setMinimumHeight(170)
+        ll.addWidget(self.cards_area, 1)
+        lay.addWidget(lessons, 1)
 
-        teacher_row = QHBoxLayout()
-        teacher_row.setSpacing(10)
-        self.as_teacher = QCheckBox("Войти как преподаватель")
-        self.as_teacher.setToolTip("Права управления уроком на втором ноутбуке — по PIN-коду преподавателя")
-        self.as_teacher.toggled.connect(self._toggle_pin)
-        teacher_row.addWidget(self.as_teacher)
-        self.pin_edit = QLineEdit()
-        self.pin_edit.setProperty("role", "pin")
-        self.pin_edit.setPlaceholderText("PIN")
-        self.pin_edit.setMaxLength(12)
-        self.pin_edit.setVisible(False)
-        teacher_row.addWidget(self.pin_edit)
-        teacher_row.addStretch()
-        sl.addLayout(teacher_row)
-
+        code_card, cl = card(spacing=10)
+        cl.addWidget(divider_with_text("Или подключитесь по коду"))
         code_row = QHBoxLayout()
         code_row.setSpacing(10)
         self.code_edit = QLineEdit()
         self.code_edit.setPlaceholderText("Код урока, например FB2K-9G")
         self.code_edit.setMaxLength(12)
+        self.code_edit.setMinimumHeight(40)
         self.code_edit.returnPressed.connect(self.join_by_code)
         code_row.addWidget(self.code_edit, 1)
-        self.code_btn = button("Войти по коду", "ghost", self.join_by_code,
-                               "Запасной путь, если broadcast в сети заблокирован")
+        self.code_btn = button("Войти по коду", "primaryButton", self.join_by_code,
+                               "Запасной путь, если урок не виден в списке", min_width=160, min_height=40)
         code_row.addWidget(self.code_btn)
-        sl.addLayout(code_row)
+        cl.addLayout(code_row)
 
-        other = CollapsibleBox("Другие способы подключения")
+        self.more_btn = button("▸  Другие способы подключения", "sectionToggle", self._toggle_more)
+        self.more_btn.setCheckable(True)
+        cl.addWidget(self.more_btn)
+        self.more_box = QWidget()          # обычный QWidget, видимость только через setVisible
+        more_lay = QVBoxLayout(self.more_box)
+        more_lay.setContentsMargins(0, 4, 0, 0)
+        more_lay.setSpacing(8)
+        more_lay.addWidget(label("Текст QR-кода, который показывает преподаватель:", "muted", wrap=True))
         self.qr_edit = QLineEdit()
-        self.qr_edit.setPlaceholderText('Текст QR-кода: {"version":1,"session_id":…}')
-        other.add_widget(label("Вставьте текст QR-кода, который показывает преподаватель:", "muted", wrap=True))
-        other.add_widget(self.qr_edit)
-        other.add_widget(button("Войти по QR", "ghost", self.join_by_qr))
+        self.qr_edit.setPlaceholderText('{"version":1,"session_id":…}')
+        self.qr_edit.setMinimumHeight(36)
+        more_lay.addWidget(self.qr_edit)
+        more_lay.addWidget(button("Войти по QR", "", self.join_by_qr, min_height=36))
+        more_lay.addWidget(label("Прямое подключение к компьютеру преподавателя:", "muted", wrap=True))
         self.ip_edit = QLineEdit()
-        self.ip_edit.setPlaceholderText("IP:порт, например 192.168.1.10:45821")
-        other.add_widget(label("Прямое подключение к компьютеру преподавателя:", "muted", wrap=True))
-        other.add_widget(self.ip_edit)
-        other.add_widget(button("Подключиться по IP", "ghost", self.connect_ip))
-        sl.addWidget(other)
-        columns.addWidget(student, 3)
+        self.ip_edit.setPlaceholderText("192.168.1.10:45821")
+        self.ip_edit.setMinimumHeight(36)
+        more_lay.addWidget(self.ip_edit)
+        more_lay.addWidget(button("Подключиться по IP", "", self.connect_ip, min_height=36))
+        self.more_box.setVisible(False)
+        cl.addWidget(self.more_box)
+        lay.addWidget(code_card)
+        return page
 
-        # ---------------- блок преподавателя
-        teacher = QFrame()
-        teacher.setProperty("card", "true")
-        tl = QVBoxLayout(teacher)
-        tl.setContentsMargins(18, 16, 18, 16)
-        tl.setSpacing(10)
-        tl.addWidget(label("Создать урок", "h2"))
-        tl.addWidget(label("Вы станете преподавателем этого урока.", "muted", wrap=True))
+    def _toggle_more(self) -> None:
+        self.more_box.setVisible(self.more_btn.isChecked())
+        self.more_btn.setText(("▾  " if self.more_btn.isChecked() else "▸  ") + "Другие способы подключения")
+
+    # ---------------- экран преподавателя
+    def _build_teacher_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        create, cl = card(spacing=12)
+        cl.addWidget(label("Начать новый урок", "h2"))
+        cl.addWidget(label("Вы станете преподавателем: сможете создавать каналы, публиковать объявления "
+                           "и завершить урок для всех.", "muted", wrap=True))
         form = QFormLayout()
         form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.topic_edit = QLineEdit("Урок")
-        self.topic_edit.setPlaceholderText("Тема урока")
-        form.addRow("Тема", self.topic_edit)
+        self.topic_edit.setPlaceholderText("Например: Алгоритмы и структуры данных")
+        self.topic_edit.setMinimumHeight(40)
+        form.addRow("Тема урока", self.topic_edit)
         self.create_pin = QLineEdit(DEFAULT_PIN)
-        self.create_pin.setProperty("role", "pin")
+        self.create_pin.setObjectName("pinInput")
         self.create_pin.setMaxLength(12)
+        self.create_pin.setMinimumHeight(40)
         form.addRow("PIN преподавателя", self.create_pin)
         self.duration = QSpinBox()
         self.duration.setRange(5, 24 * 60)
         self.duration.setValue(120)
+        self.duration.setSingleStep(15)
         self.duration.setSuffix(" мин")
+        self.duration.setMinimumHeight(40)
         form.addRow("Длительность", self.duration)
-        tl.addLayout(form)
-        tl.addWidget(label("PIN нужен, только если вы захотите получить права управления с другого ноутбука. "
+        cl.addLayout(form)
+        cl.addWidget(label("PIN нужен, только чтобы получить права преподавателя с другого ноутбука. "
                            "Ученикам он не требуется.", "muted", wrap=True))
-        self.create_btn = button("Создать урок", "primary", self.create_session)
-        tl.addWidget(self.create_btn)
-        tl.addStretch()
-        columns.addWidget(teacher, 2)
+        self.create_btn = button("Начать урок", "primaryButton", self.create_session, min_height=46)
+        cl.addWidget(self.create_btn)
+        lay.addWidget(create)
+
+        join, jl = card(spacing=10)
+        jl.addWidget(divider_with_text("Или подключитесь к уроку, который уже идёт"))
+        jl.addWidget(label("Введите код урока и PIN преподавателя — получите права управления "
+                           "на этом ноутбуке.", "muted", wrap=True))
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.t_code_edit = QLineEdit()
+        self.t_code_edit.setPlaceholderText("Код урока")
+        self.t_code_edit.setMaxLength(12)
+        self.t_code_edit.setMinimumHeight(40)
+        row.addWidget(self.t_code_edit, 2)
+        self.t_pin_edit = QLineEdit()
+        self.t_pin_edit.setObjectName("pinInput")
+        self.t_pin_edit.setPlaceholderText("PIN")
+        self.t_pin_edit.setMaxLength(12)
+        self.t_pin_edit.setMinimumHeight(40)
+        self.t_pin_edit.returnPressed.connect(self.join_as_teacher)
+        row.addWidget(self.t_pin_edit, 1)
+        self.t_join_btn = button("Войти как преподаватель", "", self.join_as_teacher, min_width=200, min_height=40)
+        row.addWidget(self.t_join_btn)
+        jl.addLayout(row)
+        lay.addWidget(join)
+        lay.addStretch()
+        return page
+
+    def _on_role_switch(self, role: int) -> None:
+        self.stack.setCurrentIndex(role)
+        self.refresh()
 
     # ---------------- команды
     def _save_name(self) -> None:
         name = self.name_edit.text().strip()
-        if name:
+        if name and name != self.node.display_name:
             self.node.set_display_name(name)
             self.win.refresh_status()
-
-    def _toggle_pin(self, on: bool) -> None:
-        self.pin_edit.setVisible(on)
-        if on:
-            self.pin_edit.setFocus()
 
     def _require_name(self) -> bool:
         if self.name_edit.text().strip():
@@ -217,38 +273,39 @@ class LoginPage(QWidget):
         self.name_edit.setFocus()
         return False
 
-    def _teacher_pin(self) -> str:
-        return self.pin_edit.text().strip() if self.as_teacher.isChecked() else ""
-
     def _set_busy(self, busy: bool, session_id: str | None = None) -> None:
         self._joining = busy
-        self.code_btn.setEnabled(not busy)
-        self.create_btn.setEnabled(not busy)
-        for sid, card in self._cards.items():
-            card.set_busy(busy and sid == session_id)
+        for w in (self.code_btn, self.create_btn, self.t_join_btn):
+            w.setEnabled(not busy)
+        for sid, c in self._cards.items():
+            c.set_busy(busy and sid == session_id)
             if not busy:
-                card.set_enabled_join(True)
+                c.set_enabled_join(True)
             elif sid != session_id:
-                card.set_enabled_join(False)
+                c.set_enabled_join(False)
 
     def _joined(self, _result: Any) -> None:
         self._set_busy(False)
+        self.code_btn.setText("Войти по коду")
+        self.t_join_btn.setText("Войти как преподаватель")
         self.win.on_joined()
 
     def _failed(self, msg: str) -> None:
         self._set_busy(False)
+        self.code_btn.setText("Войти по коду")
+        self.t_join_btn.setText("Войти как преподаватель")
+        self.create_btn.setText("Начать урок")
         self.win.toast.show_message(msg, "error", 6000)
 
     def join_session(self, session_id: str) -> None:
         if self._joining or not self._require_name():
             self._set_busy(False)
             return
-        card = self._cards.get(session_id)
-        data = {"name": card.title.text() if card else "", "code": card.code_pill.text() if card else ""}
+        c = self._cards.get(session_id)
+        name = c.title.text() if c else ""
+        code = c.code_pill.text() if c else ""
         self._set_busy(True, session_id)
-        self.win.bridge.call(
-            self.node.join_session(session_id, data["name"], data["code"], teacher_pin=self._teacher_pin()),
-            self._joined, self._failed)
+        self.win.bridge.call(self.node.join_session(session_id, name, code), self._joined, self._failed)
 
     def join_by_code(self) -> None:
         if self._joining or not self._require_name():
@@ -259,8 +316,19 @@ class LoginPage(QWidget):
             return
         self._set_busy(True)
         self.code_btn.setText("Подключение…")
-        self.win.bridge.call(self.node.join_by_code(code, self._teacher_pin()), self._joined, self._failed)
-        QTimer.singleShot(50, lambda: self.code_btn.setText("Войти по коду"))
+        self.win.bridge.call(self.node.join_by_code(code), self._joined, self._failed)
+
+    def join_as_teacher(self) -> None:
+        if self._joining or not self._require_name():
+            return
+        code = self.t_code_edit.text().strip()
+        pin = self.t_pin_edit.text().strip()
+        if not code or not pin:
+            self.win.toast.show_message("Введите код урока и PIN преподавателя", "error")
+            return
+        self._set_busy(True)
+        self.t_join_btn.setText("Подключение…")
+        self.win.bridge.call(self.node.join_by_code(code, pin), self._joined, self._failed)
 
     def join_by_qr(self) -> None:
         if self._joining or not self._require_name():
@@ -270,7 +338,7 @@ class LoginPage(QWidget):
             self.win.toast.show_message("Вставьте текст QR-кода", "error")
             return
         self._set_busy(True)
-        self.win.bridge.call(self.node.join_by_qr(text, self._teacher_pin()), self._joined, self._failed)
+        self.win.bridge.call(self.node.join_by_qr(text), self._joined, self._failed)
 
     def connect_ip(self) -> None:
         host, _, port = self.ip_edit.text().strip().rpartition(":")
@@ -278,133 +346,123 @@ class LoginPage(QWidget):
             self.win.toast.show_message("Формат: IP:порт, например 192.168.1.10:45821", "error")
             return
         self.win.bridge.call(self.node.connect_manual(host, int(port)),
-                             lambda _: self.win.toast.show_message("Подключаемся, урок появится в списке", "info"),
+                             lambda _: self.win.toast.show_message("Подключаемся — урок появится в списке", "info"),
                              self._failed)
 
     def create_session(self) -> None:
         if self._joining or not self._require_name():
             return
         self._set_busy(True)
-        self.create_btn.setText("Создаём…")
+        self.create_btn.setText("Создаём урок…")
         self.win.bridge.call(
             self.node.create_session(self.topic_edit.text(), self.duration.value(), self.create_pin.text().strip()),
             self._created, self._failed)
 
     def _created(self, session: dict) -> None:
         self._set_busy(False)
-        self.create_btn.setText("Создать урок")
+        self.create_btn.setText("Начать урок")
         self.win.on_session_created(session)
 
-    # ---------------- обновление списка
+    # ---------------- обновление списка уроков
     def refresh(self) -> None:
         self.name_edit.setEnabled(not self._joining)
+        if self.stack.currentIndex() != ROLE_STUDENT:
+            return
         sessions = self.node.sessions_in_network()
         seen = set()
         for data in sessions:
             sid = data["session_id"]
             seen.add(sid)
-            card = self._cards.get(sid)
-            if card is None:
-                card = SessionCard(data)
-                card.join_requested.connect(self.join_session)
-                self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
-                self._cards[sid] = card
+            c = self._cards.get(sid)
+            if c is None:
+                c = SessionCard(data)
+                c.join_requested.connect(self.join_session)
+                self.cards_layout.insertWidget(self.cards_layout.count() - 1, c)
+                self._cards[sid] = c
             else:
-                card.update_data(data)
+                c.update_data(data)
         for sid in list(self._cards):          # урок закрыт или пропал из сети — карточка уходит
             if sid not in seen:
                 self._cards.pop(sid).deleteLater()
         if sessions:
             self.hint.setText(f"Найдено уроков: {len(sessions)}. Нажмите [Присоединиться] у нужного.")
         else:
-            self.hint.setText("Ищем уроки в сети… Попросите преподавателя создать урок, "
-                              "либо введите код урока ниже.")
+            self.hint.setText("Ищем уроки в сети… Попросите преподавателя начать урок "
+                              "или введите код урока ниже.")
 
 
 # ======================================================================== экран активного урока
 class ActiveLessonPage(QWidget):
-    """В уроке: компактная карточка, QR по кнопке, завершение урока, подтверждение роли по PIN."""
+    """В уроке: компактная карточка с кодом, QR по кнопке, завершение урока, подтверждение роли по PIN."""
 
     def __init__(self, win: "MainWindow"):
         super().__init__()
         self.win = win
         self.node = win.node
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
-        root.setSpacing(14)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
 
-        card = QFrame()
-        card.setProperty("card", "true")
-        cl = QHBoxLayout(card)
-        cl.setContentsMargins(22, 18, 22, 18)
-        cl.setSpacing(24)
-
+        info_card, cl = card(margins=(20, 16, 20, 16), spacing=18, vertical=False)
         left = QVBoxLayout()
         left.setSpacing(6)
-        self.topic = label("—", "h1")
-        self.topic.setWordWrap(True)
+        self.topic = label("—", "h1", wrap=True)
         left.addWidget(self.topic)
         self.meta = label("", "muted", wrap=True)
         left.addWidget(self.meta)
         self.role_pill = label("", "pill")
         left.addWidget(self.role_pill, 0, Qt.AlignLeft)
+        left.addStretch()
         cl.addLayout(left, 1)
 
         right = QVBoxLayout()
         right.setSpacing(8)
         right.addWidget(label("Код урока", "muted"), 0, Qt.AlignHCenter)
-        self.code = label("—", "code")
+        self.code = label("—", "sessionCode", selectable=True)
         self.code.setAlignment(Qt.AlignCenter)
-        self.code.setTextInteractionFlags(Qt.TextSelectableByMouse)
         right.addWidget(self.code)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(button("Показать QR-код", "primary", self.show_qr, "Открыть QR на весь экран для проектора"))
-        row.addWidget(button("Копировать код", "ghost", self.copy_code))
-        right.addLayout(row)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addWidget(button("Показать QR-код", "primaryButton", self.show_qr,
+                                 "Открыть QR на весь экран — удобно выводить на проектор", min_height=38))
+        btn_row.addWidget(button("Копировать код", "", self.copy_code, min_height=38))
+        right.addLayout(btn_row)
         cl.addLayout(right)
-        root.addWidget(card)
+        root.addWidget(info_card)
 
-        self.pin_card = QFrame()
-        self.pin_card.setProperty("card", "warning")
-        pl = QHBoxLayout(self.pin_card)
-        pl.setContentsMargins(18, 12, 18, 12)
-        pl.setSpacing(12)
-        pl.addWidget(label("Вы преподаватель? Введите PIN, чтобы получить права управления уроком:", "muted", wrap=True), 1)
+        self.pin_card, pl = card("warningCard", margins=(18, 12, 18, 12), spacing=12, vertical=False)
+        pl.addWidget(label("Вы преподаватель? Введите PIN, чтобы получить права управления уроком:",
+                           "muted", wrap=True), 1)
         self.claim_pin = QLineEdit()
-        self.claim_pin.setProperty("role", "pin")
+        self.claim_pin.setObjectName("pinInput")
         self.claim_pin.setPlaceholderText("PIN")
         self.claim_pin.setMaxLength(12)
+        self.claim_pin.setMinimumHeight(38)
+        self.claim_pin.setMinimumWidth(120)
         self.claim_pin.returnPressed.connect(self.claim_teacher)
         pl.addWidget(self.claim_pin)
-        pl.addWidget(button("Подтвердить", "ghost", self.claim_teacher))
+        pl.addWidget(button("Подтвердить", "", self.claim_teacher, min_height=38))
         root.addWidget(self.pin_card)
 
-        actions = QFrame()
-        actions.setProperty("card", "true")
-        al = QHBoxLayout(actions)
-        al.setContentsMargins(22, 16, 22, 16)
-        al.setSpacing(12)
-        al.addWidget(button("Перейти в чат", "primary", lambda: self.win.tabs.setCurrentIndex(TAB_CHAT)))
-        al.addWidget(button("Передать файл", "ghost", lambda: self.win.tabs.setCurrentIndex(TAB_FILES)))
+        actions, al = card(margins=(20, 14, 20, 14), spacing=10, vertical=False)
+        al.addWidget(button("Перейти в чат", "primaryButton", lambda: self.win.tabs.setCurrentIndex(TAB_CHAT),
+                            min_height=38))
+        al.addWidget(button("Передать файл", "", lambda: self.win.tabs.setCurrentIndex(TAB_FILES), min_height=38))
         al.addStretch()
-        self.leave_btn = button("Выйти из урока", "ghost", self.leave)
+        self.leave_btn = button("Выйти из урока", "", self.leave, min_height=38)
         al.addWidget(self.leave_btn)
-        self.close_btn = button("Завершить урок", "danger", self.close_session,
-                                "Урок завершится у всех участников")
+        self.close_btn = button("Завершить урок", "dangerButton", self.close_session,
+                                "Урок завершится у всех участников", min_height=38)
         al.addWidget(self.close_btn)
         root.addWidget(actions)
 
-        self.participants = QFrame()
-        self.participants.setProperty("card", "true")
-        ppl = QVBoxLayout(self.participants)
-        ppl.setContentsMargins(18, 14, 18, 14)
-        ppl.setSpacing(8)
+        people, ppl = card(spacing=8)
         ppl.addWidget(label("Участники урока", "h2"))
         self.members = QListWidget()
         self.members.setSelectionMode(QListWidget.NoSelection)
+        self.members.setMinimumHeight(140)
         ppl.addWidget(self.members)
-        root.addWidget(self.participants, 1)
+        root.addWidget(people, 1)
 
     # ---------------- команды
     def show_qr(self) -> None:
@@ -441,7 +499,8 @@ class ActiveLessonPage(QWidget):
                              lambda m: self.win.toast.show_message(m, "error"))
 
     def leave(self) -> None:
-        if QMessageBox.question(self.win, "Выйти из урока", "Выйти из урока? Вы сможете вернуться по коду.") == QMessageBox.Yes:
+        if QMessageBox.question(self.win, "Выйти из урока",
+                                "Выйти из урока? Вы сможете вернуться по коду.") == QMessageBox.Yes:
             self.win.bridge.call(self.node.leave_session(), lambda _: self.win.refresh_all(),
                                  lambda m: self.win.toast.show_message(m, "error"))
 
@@ -453,7 +512,7 @@ class ActiveLessonPage(QWidget):
         box.setText(f"Завершить урок «{s['name'] if s else ''}» для всех участников?")
         box.setInformativeText("Все ноутбуки выйдут на экран входа. Переписка и файлы останутся на компьютерах.")
         yes = box.addButton("Завершить урок", QMessageBox.YesRole)
-        yes.setProperty("kind", "danger")
+        yes.setObjectName("dangerButton")
         box.addButton("Отмена", QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() is yes:
@@ -486,7 +545,7 @@ class ActiveLessonPage(QWidget):
             role = " · преподаватель" if m["role"] == "teacher" else ""
             blocked = " · доступ к чату ограничен" if m["blocked"] else ""
             it = QListWidgetItem(f"{'●' if online else '○'}  {m['display_name'] or m['device_id'][:8]}{role}{blocked}")
-            it.setForeground(QColor("#1a7f37") if online else QColor("#8a97a6"))
+            it.setForeground(QColor("#1a7f37") if online else QColor("#8c959f"))
             self.members.addItem(it)
 
 
@@ -505,22 +564,25 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"LocalClass {__version__}")
         self.setWindowIcon(app_icon())
-        self.resize(1240, 820)
-        self.setMinimumSize(980, 640)
+        self.resize(1180, 780)
+        self.setMinimumSize(900, 560)
         self.setAcceptDrops(True)
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
-        self.tabs.addTab(self._build_session_tab(), "Урок")
-        self.tabs.addTab(self._build_chat_tab(), "Чат")
-        self.tabs.addTab(self._build_files_tab(), "Файлы")
-        self.tabs.addTab(self._build_peers_tab(), "Компьютеры")
-        self.tabs.addTab(self._build_diag_tab(), "Диагностика")
-        self.tabs.addTab(self._build_logs_tab(), "Логи")
-        self.tabs.addTab(self._build_settings_tab(), "Настройки")
+        # каждая вкладка — в прокручиваемой области: при масштабе 125–150 % появляется скролл,
+        # а содержимое не сжимается и не накладывается
+        self.tabs.addTab(scrollable(self._build_session_tab(), min_height=620), "Урок")
+        self.tabs.addTab(scrollable(self._build_chat_tab(), min_width=860, min_height=520), "Чат")
+        self.tabs.addTab(scrollable(self._build_files_tab(), min_height=560), "Файлы")
+        self.tabs.addTab(scrollable(self._build_peers_tab(), min_height=420), "Компьютеры")
+        self.tabs.addTab(scrollable(self._build_diag_tab(), min_height=420), "Диагностика")
+        self.tabs.addTab(scrollable(self._build_logs_tab(), min_height=420), "Логи")
+        self.tabs.addTab(scrollable(self._build_settings_tab(), min_height=520), "Настройки")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.status_label = QLabel()
+        self.status_label.setWordWrap(False)
         self.statusBar().addPermanentWidget(self.status_label, 1)
         self.toast = Toast(self)
 
@@ -558,84 +620,93 @@ class MainWindow(QMainWindow):
 
     def on_session_created(self, session: dict) -> None:
         self.refresh_all()
-        self.toast.show_message(f"Урок создан. Код для учеников: {session.get('code', '')}", "ok", 6000)
+        self.toast.show_message(f"Урок начат. Код для учеников: {session.get('code', '')}", "ok", 6000)
 
     # ---------------- вкладка «Чат»
     def _build_chat_tab(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(12, 12, 12, 12)
-        split = QSplitter()
+        split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
         lay.addWidget(split)
 
+        # --- левая колонка: каналы и участники
         left = QWidget()
+        left.setMinimumWidth(200)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 8, 0)
         ll.setSpacing(8)
         ll.addWidget(label("Каналы", "h2"))
         self.channel_list = QListWidget()
-        self.channel_list.setMaximumHeight(190)
+        self.channel_list.setMinimumHeight(90)
         self.channel_list.currentItemChanged.connect(self.on_channel_selected)
-        ll.addWidget(self.channel_list)
+        ll.addWidget(self.channel_list, 1)
         ch_row = QHBoxLayout()
         ch_row.setSpacing(8)
-        self.btn_new_channel = button("+ канал", "ghost", self.new_channel)
-        self.btn_close_channel = button("закрыть", "ghost", self.close_channel)
+        self.btn_new_channel = button("+ канал", "", self.new_channel)
+        self.btn_close_channel = button("закрыть", "", self.close_channel)
         ch_row.addWidget(self.btn_new_channel)
         ch_row.addWidget(self.btn_close_channel)
         ll.addLayout(ch_row)
         ll.addWidget(label("Участники", "h2"))
-        ll.addWidget(label("двойной клик — личное сообщение", "muted"))
+        ll.addWidget(label("двойной клик — личное сообщение", "muted", wrap=True))
         self.member_list = QListWidget()
+        self.member_list.setMinimumHeight(120)
         self.member_list.itemDoubleClicked.connect(self.open_dm)
         self.member_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.member_list.customContextMenuRequested.connect(self.member_menu)
-        ll.addWidget(self.member_list, 3)
+        ll.addWidget(self.member_list, 2)
         split.addWidget(left)
 
+        # --- центр: переписка и ввод
         center = QWidget()
+        center.setMinimumWidth(380)
         cl = QVBoxLayout(center)
         cl.setContentsMargins(8, 0, 8, 0)
         cl.setSpacing(8)
         title_row = QHBoxLayout()
+        title_row.setSpacing(10)
         self.chat_title = label("#general", "h2")
         title_row.addWidget(self.chat_title)
         title_row.addStretch()
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Поиск по сообщениям…")
-        self.search_box.setMaximumWidth(280)
+        self.search_box.setMinimumWidth(180)
+        self.search_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.search_box.textChanged.connect(self.refresh_messages)
-        title_row.addWidget(self.search_box)
+        title_row.addWidget(self.search_box, 1)
         cl.addLayout(title_row)
         self.messages_view = QTextBrowser()
         self.messages_view.setOpenExternalLinks(True)
+        self.messages_view.setMinimumHeight(200)
         self.messages_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.messages_view.customContextMenuRequested.connect(self.message_menu)
         cl.addWidget(self.messages_view, 1)
         self.announce_cb = QCheckBox("Отправить как объявление для всего класса")
         cl.addWidget(self.announce_cb)
+
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
+        self.attach_btn = button("📎", "iconButton", self.attach_file, "Прикрепить файл",
+                                 min_width=40, min_height=40)
+        self.attach_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        input_row.addWidget(self.attach_btn, 0, Qt.AlignBottom)
         self.msg_input = MessageInput(self.send_message)
         input_row.addWidget(self.msg_input, 1)
-        self.attach_btn = button("📎", "icon", self.attach_file, "Прикрепить файл")
-        input_row.addWidget(self.attach_btn, 0, Qt.AlignBottom)
-        self.send_btn = button("Отправить", "primary", self.send_message)
-        self.send_btn.setMinimumWidth(130)
+        self.send_btn = button("Отправить", "sendButton", self.send_message, min_width=100, min_height=40)
         input_row.addWidget(self.send_btn, 0, Qt.AlignBottom)
         cl.addLayout(input_row)
         split.addWidget(center)
 
+        # --- правая колонка: лента ссылок
         right = QWidget()
+        right.setMinimumWidth(220)
         rl = QVBoxLayout(right)
         rl.setContentsMargins(8, 0, 0, 0)
         rl.setSpacing(8)
         rl.addWidget(label("Лента ссылок", "h2"))
-        rl.addWidget(label("все ссылки из чата — открываются одним кликом", "muted", wrap=True))
-        self.links_area = QScrollArea()
-        self.links_area.setWidgetResizable(True)
-        self.links_area.setFrameShape(QFrame.NoFrame)
-        self.links_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        rl.addWidget(label("ссылки из чата открываются одним кликом", "muted", wrap=True))
         holder = QWidget()
         self.links_layout = QVBoxLayout(holder)
         self.links_layout.setContentsMargins(0, 0, 0, 0)
@@ -643,13 +714,15 @@ class MainWindow(QMainWindow):
         self.links_empty = label("Ссылок пока нет. Отправьте ссылку в чат — она появится здесь.", "muted", wrap=True)
         self.links_layout.addWidget(self.links_empty)
         self.links_layout.addStretch()
-        self.links_area.setWidget(holder)
+        self.links_area = scrollable(holder, plain=True)
+        self.links_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         rl.addWidget(self.links_area, 1)
         split.addWidget(right)
+
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
-        split.setSizes([250, 690, 320])
+        split.setSizes([240, 640, 260])
         return w
 
     def on_channel_selected(self, item: QListWidgetItem | None, _prev=None) -> None:
@@ -758,7 +831,7 @@ class MainWindow(QMainWindow):
             blocked = " 🚫" if m["blocked"] else ""
             it = QListWidgetItem(f"{'●' if online else '○'}  {m['display_name'] or m['device_id'][:8]}{role}{blocked}")
             it.setData(Qt.UserRole, m["device_id"])
-            it.setForeground(QColor("#1a7f37") if online else QColor("#8a97a6"))
+            it.setForeground(QColor("#1a7f37") if online else QColor("#8c959f"))
             self.member_list.addItem(it)
 
     @staticmethod
@@ -783,18 +856,18 @@ class MainWindow(QMainWindow):
             ts = time.strftime("%H:%M", time.localtime(m["timestamp"]))
             who = html.escape(m.get("display_name") or self.node._name_of(m["device_id"]))
             body = self._render_text(m["text"])
-            style = ' style="background:#fff8e1;padding:6px;border-radius:6px"' if m["kind"] == "announcement" else ""
-            ch = f" <span style='color:#8a97a6'>#{html.escape(m['channel'])}</span>" if q else ""
+            style = ' style="background:#fff8c5;padding:6px;border-radius:6px"' if m["kind"] == "announcement" else ""
+            ch = f" <span style='color:#8c959f'>#{html.escape(m['channel'])}</span>" if q else ""
             parts.append(f'<div{style}><a name="msg:{m["message_id"]}" href="msg:{m["message_id"]}" '
-                         f'style="text-decoration:none;color:#8a97a6">{ts}</a> <b>{who}</b>{ch}'
+                         f'style="text-decoration:none;color:#8c959f">{ts}</a> <b>{who}</b>{ch}'
                          f'{" 📣" if m["kind"] == "announcement" else ""}: {body}</div><div style="height:6px"></div>')
         self.messages_view.setHtml("".join(parts) or "<i>Сообщений пока нет — напишите первым</i>")
         self.messages_view.verticalScrollBar().setValue(self.messages_view.verticalScrollBar().maximum())
 
     def refresh_links(self) -> None:
         """Лента ссылок: события LINK_CREATED плюс все ссылки, найденные в сообщениях чата."""
-        for card in self._link_cards:
-            card.deleteLater()
+        for c in self._link_cards:
+            c.deleteLater()
         self._link_cards.clear()
         if not self.node.session_id:
             self.links_empty.setVisible(True)
@@ -813,10 +886,11 @@ class MainWindow(QMainWindow):
                 seen.add(url)
                 items.append((url, url, self.node._name_of(m["device_id"])))
         self.links_empty.setVisible(not items)
+        color = link_color(self.node.settings.theme)
         for url, title, author in items[:100]:
-            card = LinkCard(url, title, author, color=link_color(self.node.settings.theme))
-            self.links_layout.insertWidget(self.links_layout.count() - 1, card)
-            self._link_cards.append(card)
+            c = LinkCard(url, title, author, color=color)
+            self.links_layout.insertWidget(self.links_layout.count() - 1, c)
+            self._link_cards.append(c)
 
     # ---------------- вкладка «Файлы»
     def _build_files_tab(self) -> QWidget:
@@ -831,44 +905,50 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(label("Файлы урока", "h2"))
         self.files_table = QTableWidget(0, 4)
-        self.files_table.setHorizontalHeaderLabels(["Имя файла", "Размер", "Кто выложил", ""])
+        self.files_table.setHorizontalHeaderLabels(["Имя файла", "Размер", "Кто выложил", "Действие"])
         head = self.files_table.horizontalHeader()
         head.setSectionResizeMode(0, QHeaderView.Stretch)
         head.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         head.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        head.setSectionResizeMode(3, QHeaderView.Fixed)
-        self.files_table.setColumnWidth(3, 210)
+        head.setSectionResizeMode(3, QHeaderView.Fixed)     # ширину подгоняем под кнопки действия
         self.files_table.setWordWrap(False)
+        self.files_table.setMinimumHeight(180)
         self.files_table.verticalHeader().setVisible(False)
-        self.files_table.verticalHeader().setDefaultSectionSize(54)
+        self.files_table.verticalHeader().setDefaultSectionSize(46)
         self.files_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.files_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.files_table.customContextMenuRequested.connect(self.file_menu)
-        lay.addWidget(self.files_table, 2)
+        lay.addWidget(self.files_table, 1)
 
         row = QHBoxLayout()
-        row.addWidget(button("Открыть папку с файлами", "ghost",
-                             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.node.paths.files)))))
-        row.addStretch()
+        row.setSpacing(8)
+        self.downloads_label = label("", "muted", wrap=True)
+        row.addWidget(self.downloads_label, 1)
+        row.addWidget(button("Открыть папку загрузок", "", self.open_downloads_folder))
         lay.addLayout(row)
 
         self.transfers_box = QGroupBox("Активные передачи")
         tl = QVBoxLayout(self.transfers_box)
         self.transfers_table = QTableWidget(0, 5)
-        self.transfers_table.setHorizontalHeaderLabels(["Файл", "Направление", "С кем", "Прогресс", "Скорость / осталось"])
+        self.transfers_table.setHorizontalHeaderLabels(["Файл", "Направление", "С кем", "Прогресс",
+                                                        "Скорость / осталось"])
         th = self.transfers_table.horizontalHeader()
         th.setSectionResizeMode(0, QHeaderView.Stretch)
         th.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         th.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        th.setSectionResizeMode(3, QHeaderView.Fixed)
         th.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self.transfers_table.setColumnWidth(3, 220)
         self.transfers_table.verticalHeader().setVisible(False)
-        self.transfers_table.verticalHeader().setDefaultSectionSize(46)
-        self.transfers_table.setMaximumHeight(220)
+        self.transfers_table.verticalHeader().setDefaultSectionSize(42)
+        self.transfers_table.setMinimumHeight(110)
         tl.addWidget(self.transfers_table)
-        lay.addWidget(self.transfers_box, 1)
+        lay.addWidget(self.transfers_box)
         self.transfers_box.setVisible(False)       # скрыта, пока нет активных передач
         return w
+
+    def open_downloads_folder(self) -> None:
+        self.node.paths.files.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.node.paths.files)))
 
     def share_file(self, path: str, peer: str | None = None) -> None:
         if not self.node.session_id:
@@ -884,7 +964,8 @@ class MainWindow(QMainWindow):
         if est["warn"]:
             r = QMessageBox.question(self, "Большой файл",
                                      f"Файл {fmt_size(size)}. Если его скачают все {recipients} участ., это примерно "
-                                     f"{est['gb']:.1f} ГБ трафика по Wi-Fi — передача займёт значительное время.\n\nПродолжить?")
+                                     f"{est['gb']:.1f} ГБ трафика по Wi-Fi — передача займёт значительное время.\n\n"
+                                     "Продолжить?")
             if r != QMessageBox.Yes:
                 return
         ch = self.channel if not self.channel.startswith("dm:") else "general"
@@ -909,7 +990,7 @@ class MainWindow(QMainWindow):
                          lambda _: (self.refresh_files(), self.toast.show_message("Загрузка началась", "info", 2500)),
                          lambda m: self.toast.show_message(m, "error", 6000))
 
-    def open_file_folder(self, path: str) -> None:
+    def open_file_location(self, path: str) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))   # папку, не файл (ТЗ 12.8)
 
     def file_menu(self, pos) -> None:
@@ -919,16 +1000,53 @@ class MainWindow(QMainWindow):
         f = self.node.store.shared_file(fid) or {}
         menu = QMenu(self)
         if f.get("local_path") and Path(f["local_path"]).exists():
-            menu.addAction("Открыть папку", lambda: self.open_file_folder(f["local_path"]))
+            menu.addAction("📂 Открыть папку", lambda: self.open_file_location(f["local_path"]))
         else:
-            menu.addAction("Скачать", lambda: self.download_file(fid))
+            menu.addAction("⬇ Скачать", lambda: self.download_file(fid))
         menu.addSeparator()
         menu.addAction("Удалить из урока",
                        lambda: self.bridge.call(self.node.delete_file(fid), lambda _: self.refresh_files(),
                                                 lambda m: self.toast.show_message(m, "error")))
         menu.exec(self.files_table.mapToGlobal(pos))
 
+    def _file_action_widget(self, f: dict, transfer: dict | None) -> QWidget:
+        """Двухпозиционная кнопка: [⬇ Скачать] → прогресс → [📂 Открыть] (ТЗ v1.3, 3.1)."""
+        mine = f["owner_id"] == self.node.device_id
+        local = bool(f.get("local_path")) and Path(f["local_path"]).exists()
+        if local or mine:
+            btn = button("📂 Открыть", "", lambda p=f.get("local_path"): self.open_file_location(p),
+                         "Показать файл в папке")
+            btn.setEnabled(local)
+            if not local:
+                btn.setText("файл не найден")
+            return cell_widget(btn)
+        if transfer and transfer["status"] in ("active", "queued"):
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            prog = self.node.transfers.progress.get(transfer["transfer_id"])
+            if prog:
+                bar.setValue(int(prog["percent"]))
+                bar.setFormat(f"%p%  ·  {fmt_speed(prog['speed'])}")
+            else:
+                bm = Bitmap(transfer["chunk_count"], transfer["received_chunks"])
+                bar.setValue(int(100 * bm.received() / max(1, transfer["chunk_count"])))
+                bar.setFormat("%p%  ·  в очереди" if transfer["status"] == "queued" else "%p%")
+            bar.setMinimumWidth(160)
+            return cell_widget(bar)
+        online = bool(self.node.mesh.get(f["owner_id"]))
+        resume = bool(transfer and transfer["status"] == "paused")
+        btn = button("⬇ Продолжить" if resume else "⬇ Скачать", "primaryButton",
+                     lambda fid=f["file_id"]: self.download_file(fid))
+        btn.setEnabled(online)
+        if not online:
+            btn.setText("нет в сети")
+            btn.setToolTip("Компьютер, выложивший файл, сейчас недоступен — файлы передаются только напрямую")
+        elif resume:
+            btn.setToolTip(transfer["error"] or "продолжить с места обрыва")
+        return cell_widget(btn)
+
     def refresh_files(self) -> None:
+        self.downloads_label.setText(f"Принятые файлы сохраняются в {self.node.paths.files}")
         self.files_table.setRowCount(0)
         if not self.node.session_id:
             self.refresh_transfers()
@@ -938,31 +1056,14 @@ class MainWindow(QMainWindow):
             r = self.files_table.rowCount()
             self.files_table.insertRow(r)
             name_item = QTableWidgetItem(f["filename"])
-            name_item.setData(Qt.UserRole, f["file_id"])         # file_id хранится в данных строки, не в колонке
+            name_item.setData(Qt.UserRole, f["file_id"])     # file_id хранится в данных строки, не в колонке
+            name_item.setToolTip(f["filename"])
             self.files_table.setItem(r, 0, name_item)
             self.files_table.setItem(r, 1, QTableWidgetItem(fmt_size(f["size"])))
             owner = "вы" if f["owner_id"] == self.node.device_id else (f.get("owner_name") or f["owner_id"][:8])
             self.files_table.setItem(r, 2, QTableWidgetItem(owner))
-            mine = f["owner_id"] == self.node.device_id
-            local = f.get("local_path") and Path(f["local_path"]).exists()
-            t = transfers.get(f["file_id"])
-            if mine or local:
-                btn = button("Открыть папку", "ghost", lambda p=f.get("local_path"): self.open_file_folder(p))
-                btn.setEnabled(bool(local))
-            elif t and t["status"] in ("active", "queued"):
-                btn = button("Загружается…", "ghost")
-                btn.setEnabled(False)
-            else:
-                online = bool(self.node.mesh.get(f["owner_id"]))
-                btn = button("Скачать", "primary", lambda fid=f["file_id"]: self.download_file(fid))
-                btn.setEnabled(online)
-                if not online:
-                    btn.setText("Нет в сети")
-                    btn.setToolTip("Компьютер, выложивший файл, сейчас недоступен — файлы передаются только напрямую")
-                elif t and t["status"] == "paused":
-                    btn.setText("Продолжить")
-                    btn.setToolTip(t["error"] or "")
-            self.files_table.setCellWidget(r, 3, cell_widget(btn))
+            self.files_table.setCellWidget(r, 3, self._file_action_widget(f, transfers.get(f["file_id"])))
+        fit_widget_column(self.files_table, 3)
         self.refresh_transfers()
 
     def refresh_transfers(self) -> None:
@@ -976,6 +1077,7 @@ class MainWindow(QMainWindow):
             prog = self.node.transfers.progress.get(t["transfer_id"])
             bar = QProgressBar()
             bar.setRange(0, 100)
+            bar.setMinimumWidth(180)
             if prog:
                 bar.setValue(int(prog["percent"]))
             else:
@@ -994,6 +1096,7 @@ class MainWindow(QMainWindow):
             else:
                 detail = ""
             self.transfers_table.setItem(r, 4, QTableWidgetItem(detail))
+        fit_widget_column(self.transfers_table, 3)
 
     def dragEnterEvent(self, e) -> None:
         if e.mimeData().hasUrls():
@@ -1016,7 +1119,8 @@ class MainWindow(QMainWindow):
         ph.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         ph.setSectionResizeMode(5, QHeaderView.Stretch)
         self.peers_table.verticalHeader().setVisible(False)
-        self.peers_table.verticalHeader().setDefaultSectionSize(42)
+        self.peers_table.verticalHeader().setDefaultSectionSize(40)
+        self.peers_table.setMinimumHeight(200)
         self.peers_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.peers_table.customContextMenuRequested.connect(self.peer_menu)
         lay.addWidget(self.peers_table, 1)
@@ -1024,8 +1128,9 @@ class MainWindow(QMainWindow):
         row.setSpacing(8)
         self.manual_host = QLineEdit()
         self.manual_host.setPlaceholderText("IP:порт, например 192.168.1.10:45821")
+        self.manual_host.setMinimumHeight(38)
         row.addWidget(self.manual_host, 1)
-        row.addWidget(button("Подключиться вручную", "ghost", self.connect_manual))
+        row.addWidget(button("Подключиться вручную", "", self.connect_manual, min_height=38))
         lay.addLayout(row)
         lay.addWidget(label("«обнаружен» — компьютер виден в сети, но соединение не установлено; «недоступен» — "
                             "TCP-соединение не проходит (брандмауэр или изоляция клиентов на точке доступа). "
@@ -1069,8 +1174,8 @@ class MainWindow(QMainWindow):
                 if c == 0:
                     it.setData(Qt.UserRole, p["device_id"])
                 if c == 1:
-                    it.setForeground(QColor({"connected": "#1a7f37", "unreachable": "#c62828",
-                                             "conflict": "#c62828"}.get(p["status"], "#5b6b7f")))
+                    it.setForeground(QColor({"connected": "#1a7f37", "unreachable": "#cf222e",
+                                             "conflict": "#cf222e"}.get(p["status"], "#57606a")))
                 self.peers_table.setItem(r, c, it)
 
     # ---------------- вкладка «Диагностика»
@@ -1080,11 +1185,12 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(10)
         self.diag_view = QTextBrowser()
+        self.diag_view.setMinimumHeight(260)
         lay.addWidget(self.diag_view, 1)
         row = QHBoxLayout()
         row.setSpacing(8)
-        row.addWidget(button("Проверить ещё раз", "primary", self.run_diag))
-        row.addWidget(button("Подключиться вручную", "ghost", lambda: self.tabs.setCurrentIndex(TAB_PEERS)))
+        row.addWidget(button("Проверить ещё раз", "primaryButton", self.run_diag, min_height=38))
+        row.addWidget(button("Подключиться вручную", "", lambda: self.tabs.setCurrentIndex(TAB_PEERS), min_height=38))
         row.addStretch()
         lay.addLayout(row)
         return w
@@ -1097,8 +1203,8 @@ class MainWindow(QMainWindow):
         self._diag = r
         rows = "".join(
             f"<tr><td>{html.escape(c['name'])}</td>"
-            f"<td style='color:{'#1a7f37' if c['ok'] else '#c62828'}'><b>{'✓' if c['ok'] else '✗'}</b></td>"
-            f"<td style='color:#5b6b7f'>{html.escape(str(c['detail']))}</td></tr>" for c in r["checks"])
+            f"<td style='color:{'#1a7f37' if c['ok'] else '#cf222e'}'><b>{'✓' if c['ok'] else '✗'}</b></td>"
+            f"<td style='color:#57606a'>{html.escape(str(c['detail']))}</td></tr>" for c in r["checks"])
         reasons = "".join(f"<li>{html.escape(x)}</li>" for x in r["reasons"]) or "<li>проблем не обнаружено</li>"
         peers = "".join(f"<li>{html.escape(p['display_name'] or p['device_id'][:8])} — "
                         f"{STATUS_RU.get(p['status'], p['status'])} {html.escape(p['error'] or '')}</li>"
@@ -1109,7 +1215,7 @@ class MainWindow(QMainWindow):
             f"<b>Недоступно:</b> {r['unreachable']} &nbsp; <b>В других уроках:</b> {r['other_sessions']}</p>"
             f"<p><b>Возможные причины:</b></p><ul>{reasons}</ul>"
             f"<p><b>Участники урока:</b></p><ul>{peers or '<li>—</li>'}</ul>"
-            f"<p style='color:#8a97a6'>обновлено {time.strftime('%H:%M:%S', time.localtime(r['ts']))}</p>")
+            f"<p style='color:#8c959f'>обновлено {time.strftime('%H:%M:%S', time.localtime(r['ts']))}</p>")
 
     # ---------------- вкладка «Логи»
     def _build_logs_tab(self) -> QWidget:
@@ -1126,17 +1232,21 @@ class MainWindow(QMainWindow):
         self.log_cat = QComboBox()
         self.log_cat.addItems(["Все", "Сеть", "Файлы", "Чат", "Урок", "Безопасность"])
         for x in (self.log_kind, self.log_level, self.log_cat):
+            x.setMinimumHeight(36)
             x.currentIndexChanged.connect(self.refresh_logs)
             row.addWidget(x)
         self.log_filter = QLineEdit()
         self.log_filter.setPlaceholderText("фильтр по тексту или компьютеру")
+        self.log_filter.setMinimumHeight(36)
         self.log_filter.textChanged.connect(self.refresh_logs)
         row.addWidget(self.log_filter, 1)
-        row.addWidget(button("Папка логов", "ghost",
-                             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.node.paths.logs)))))
+        row.addWidget(button("Папка логов", "",
+                             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.node.paths.logs))),
+                             min_height=36))
         lay.addLayout(row)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(260)
         self.log_view.setMaximumBlockCount(5000)
         lay.addWidget(self.log_view, 1)
         return w
@@ -1163,7 +1273,8 @@ class MainWindow(QMainWindow):
                     continue
                 if cat and rec["category"] != cat:
                     continue
-                s = f"{time.strftime('%H:%M:%S', time.localtime(rec['ts']))} {rec['level']:7} {rec['category']:8} {rec['message']}"
+                s = (f"{time.strftime('%H:%M:%S', time.localtime(rec['ts']))} {rec['level']:7} "
+                     f"{rec['category']:8} {rec['message']}")
                 if text and text not in s.lower():
                     continue
                 lines.append(s)
@@ -1172,19 +1283,17 @@ class MainWindow(QMainWindow):
 
     # ---------------- вкладка «Настройки»
     def _build_settings_tab(self) -> QWidget:
-        outer = QScrollArea()
-        outer.setWidgetResizable(True)
-        outer.setFrameShape(QFrame.NoFrame)
         w = QWidget()
-        outer.setWidget(w)
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setContentsMargins(14, 14, 14, 14)
         lay.setSpacing(14)
 
         user = QGroupBox("Основные настройки")
         uf = QFormLayout(user)
         uf.setSpacing(10)
+        uf.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.set_name = QLineEdit(self.node.display_name)
+        self.set_name.setMinimumHeight(38)
         self.set_name.editingFinished.connect(self._apply_name)
         uf.addRow("Ваше имя", self.set_name)
 
@@ -1192,17 +1301,18 @@ class MainWindow(QMainWindow):
         dl_row.setSpacing(8)
         self.dl_path = QLineEdit(str(self.node.paths.files))
         self.dl_path.setReadOnly(True)
+        self.dl_path.setMinimumHeight(38)
         dl_row.addWidget(self.dl_path, 1)
-        dl_row.addWidget(button("Выбрать…", "ghost", self.pick_download_dir))
-        dl_row.addWidget(button("По умолчанию", "ghost", lambda: self.apply_download_dir("")))
+        dl_row.addWidget(button("Выбрать…", "", self.pick_download_dir, min_height=38))
+        dl_row.addWidget(button("По умолчанию", "", lambda: self.apply_download_dir(""), min_height=38))
         uf.addRow("Папка для принятых файлов", dl_row)
 
         self.theme_box = QComboBox()
         self.theme_box.addItem("Светлая", "light")
         self.theme_box.addItem("Тёмная", "dark")
         self.theme_box.setCurrentIndex(1 if self.node.settings.theme == "dark" else 0)
-        self.theme_box.currentIndexChanged.connect(
-            lambda: self.apply_theme(self.theme_box.currentData()))
+        self.theme_box.setMinimumHeight(38)
+        self.theme_box.currentIndexChanged.connect(lambda: self.apply_theme(self.theme_box.currentData()))
         uf.addRow("Тема оформления", self.theme_box)
 
         self.set_auto = QCheckBox("Автоматически принимать файлы, отправленные лично мне")
@@ -1211,19 +1321,22 @@ class MainWindow(QMainWindow):
         uf.addRow(self.set_auto)
         lay.addWidget(user)
 
-        adv = CollapsibleBox("Для системных администраторов")
-        adv.add_widget(label("Менять эти настройки нужно только при проблемах с сетью. "
-                             "Порты и discovery применяются после перезапуска приложения.", "muted", wrap=True))
+        self.adv = Section("Для системных администраторов")
+        self.adv.add_widget(label("Менять эти настройки нужно только при проблемах с сетью. "
+                                  "Порты и discovery применяются после перезапуска приложения.", "muted", wrap=True))
         af = QFormLayout()
         af.setSpacing(10)
+        af.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.set_port = QSpinBox()
         self.set_port.setRange(1024, 65535)
         self.set_port.setValue(self.node.settings.listen_port)
+        self.set_port.setMinimumHeight(36)
         self.set_port.valueChanged.connect(lambda v: self._set_setting("listen_port", v))
         af.addRow("TCP-порт", self.set_port)
         self.set_dport = QSpinBox()
         self.set_dport.setRange(1024, 65535)
         self.set_dport.setValue(self.node.settings.discovery_port)
+        self.set_dport.setMinimumHeight(36)
         self.set_dport.valueChanged.connect(lambda v: self._set_setting("discovery_port", v))
         af.addRow("UDP-порт discovery", self.set_dport)
         self.set_bc = QCheckBox("UDP broadcast discovery")
@@ -1234,32 +1347,32 @@ class MainWindow(QMainWindow):
         self.set_mdns.setChecked(self.node.settings.enable_mdns)
         self.set_mdns.toggled.connect(lambda v: self._set_setting("enable_mdns", v))
         af.addRow(self.set_mdns)
-        adv.add_layout(af)
+        self.adv.add_layout(af)
 
-        adv.add_widget(label("Сетевые интерфейсы", "h2"))
-        adv.add_widget(label("По умолчанию выбран интерфейс со шлюзом по умолчанию; виртуальные адаптеры "
-                             "(VirtualBox, Docker, Hyper-V, VPN) отключены автоматически.", "muted", wrap=True))
+        self.adv.add_widget(label("Сетевые интерфейсы", "h2"))
+        self.adv.add_widget(label("По умолчанию используется интерфейс со шлюзом по умолчанию; виртуальные "
+                                  "адаптеры (VirtualBox, Docker, Hyper-V, VPN) отключаются автоматически.",
+                                  "muted", wrap=True))
         self.iface_list = QListWidget()
-        self.iface_list.setMaximumHeight(170)
+        self.iface_list.setMinimumHeight(120)
         self.iface_list.itemChanged.connect(self.iface_toggled)
-        adv.add_widget(self.iface_list)
+        self.adv.add_widget(self.iface_list)
 
         lim = self.node.limits
-        adv.add_widget(label("Лимиты и пути", "h2"))
-        self.limits_label = label("", "muted", wrap=True)
-        self.limits_label.setText(
+        self.adv.add_widget(label("Лимиты и пути", "h2"))
+        self.adv.add_widget(label(
             f"События: {lim.max_events_per_sec}/с на компьютер, размер события ≤ {fmt_size(lim.max_event_size)}. "
             f"Файлы: ≤ {fmt_size(lim.max_file_size)}, одновременных отдач {lim.max_concurrent_outgoing}, "
-            f"чанк {fmt_size(lim.chunk_size)}, окно ACK {lim.ack_window}, хранилище ≤ {fmt_size(lim.max_storage_size)}. "
-            f"Хранение истории: {lim.retention_days} дн. Значения меняются в config/settings.json → limits.")
-        adv.add_widget(self.limits_label)
+            f"чанк {fmt_size(lim.chunk_size)}, окно ACK {lim.ack_window}, "
+            f"хранилище ≤ {fmt_size(lim.max_storage_size)}. Хранение истории: {lim.retention_days} дн. "
+            f"Значения меняются в config/settings.json → limits.", "muted", wrap=True))
         self.paths_label = QLabel()
         self.paths_label.setOpenExternalLinks(True)
         self.paths_label.setWordWrap(True)
-        adv.add_widget(self.paths_label)
-        lay.addWidget(adv)
+        self.adv.add_widget(self.paths_label)
+        lay.addWidget(self.adv)
         lay.addStretch()
-        return outer
+        return w
 
     def _apply_name(self) -> None:
         self.node.set_display_name(self.set_name.text())
@@ -1279,6 +1392,7 @@ class MainWindow(QMainWindow):
     def apply_download_dir(self, path: str) -> None:
         self.node.set_download_dir(path)
         self.dl_path.setText(str(self.node.paths.files))
+        self.refresh_files()
         self.toast.show_message(f"Файлы будут сохраняться в {self.node.paths.files}", "ok", 4000)
 
     def apply_theme(self, theme: str) -> None:
@@ -1320,7 +1434,7 @@ class MainWindow(QMainWindow):
     def iface_toggled(self, it: QListWidgetItem) -> None:
         self.node.set_interface_enabled(it.data(Qt.UserRole), it.checkState() == Qt.Checked)
 
-    # ---------------- события шины
+    # ---------------- события шины bus.py
     def on_bus(self, topic: str, data: dict) -> None:
         if topic == "log.app":
             self._log_app.append(data)
@@ -1380,7 +1494,8 @@ class MainWindow(QMainWindow):
             QApplication.instance().setStyleSheet(qss(data["theme"]))
             self.apply_theme_assets(data["theme"])
         elif topic == "protocol.mismatch":
-            self.toast.show_message("Версия LocalClass на этом компьютере устарела — обновите приложение", "error", 8000)
+            self.toast.show_message("Версия LocalClass на этом компьютере устарела — обновите приложение",
+                                    "error", 8000)
         elif topic == "peer.manual_failed":
             self.toast.show_message(f"{data['address']}: {data['error']}", "error", 6000)
         elif topic == "diagnostics.result":
@@ -1459,7 +1574,8 @@ class MainWindow(QMainWindow):
         role = " · преподаватель" if in_session and self.node.is_teacher else ""
         self.status_label.setText(
             f"{st['display_name']}{role} · {where} · на связи {st['connected']} из {st['known']} · "
-            f"порт {st['port']} · {', '.join(st['addresses'][:2])}")
+            f"порт {st['port']}")
+        self.status_label.setToolTip("Адреса: " + ", ".join(st["addresses"]))
         self.setWindowTitle(f"LocalClass {__version__} — {st['display_name']}"
                             + (f" — {s['name']}" if in_session else ""))
 
@@ -1485,7 +1601,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
-        self.toast._reposition()
+        self.toast.reposition()
 
     def closeEvent(self, e) -> None:
         self.timer.stop()     # иначе таймер успеет обратиться к уже закрытой базе

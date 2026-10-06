@@ -1,7 +1,13 @@
 """GUI-точка входа: `python -m localclass` (или LocalClass.exe). Аргументы те же, что у localclass.node."""
 from __future__ import annotations
 
+import os
 import sys
+
+# High-DPI должен быть включён ДО создания QApplication и до импорта Qt-модулей (ТЗ v1.3, 1.1):
+# на ноутбуках с масштабом 125 %/150 % иначе получаются обрезанные подписи и наложения.
+os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -14,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .ui.app.bridge import Bridge
     from .ui.app.main_window import MainWindow
-    from .ui.app.style import qss
+    from .ui.app.style import qss, set_icon_dir
 
     # масштабирование экрана 125 %/150 % на ноутбуках: округляем геометрию, иконки — под DPI
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -24,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationDisplayName("LocalClass")
     app.setQuitOnLastWindowClosed(True)
     app.setStyle("Fusion")
+    set_icon_dir(node.paths.root / "icons")    # иконки стрелок рисуются рядом с данными узла
     app.setStyleSheet(qss(node.settings.theme))
 
     bridge = Bridge(node)

@@ -12,6 +12,38 @@ DEFAULT_TCP_PORT = 45821
 DEFAULT_DISCOVERY_PORT = 45820
 
 
+def default_downloads_dir() -> Path:
+    r"""Системная папка загрузок пользователя + подпапка LocalClass (ТЗ v1.3, 3.2).
+
+    На Windows путь берётся из реестра (учитывает перенесённую папку «Загрузки»), с запасным вариантом
+    %USERPROFILE%\Downloads; на Linux — XDG_DOWNLOAD_DIR или ~/Downloads (либо ~/Загрузки).
+    """
+    base: Path | None = None
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+                base = Path(winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")[0])
+        except Exception:  # noqa: BLE001 — реестр недоступен, берём стандартный путь
+            base = None
+        if base is None or not base.is_absolute():
+            base = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Downloads"
+    else:
+        xdg = os.environ.get("XDG_DOWNLOAD_DIR", "").strip()
+        if xdg:
+            base = Path(os.path.expandvars(xdg)).expanduser()
+        else:
+            for name in ("Downloads", "Загрузки"):
+                candidate = Path.home() / name
+                if candidate.is_dir():
+                    base = candidate
+                    break
+            else:
+                base = Path.home() / "Downloads"
+    return base / "LocalClass"
+
+
 def default_data_dir() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", str(Path.home())))

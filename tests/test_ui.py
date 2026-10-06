@@ -19,8 +19,9 @@ from localclass.config import NodeConfig, Settings   # noqa: E402
 from localclass.core.node import Node                # noqa: E402
 from localclass.testing.harness import free_port     # noqa: E402
 from localclass.ui.app.bridge import Bridge          # noqa: E402
-from localclass.ui.app.main_window import TAB_CHAT, TAB_FILES, TAB_SESSION, MainWindow   # noqa: E402
-from localclass.ui.app.style import qss              # noqa: E402
+from localclass.ui.app.main_window import (ROLE_STUDENT, ROLE_TEACHER, TAB_CHAT, TAB_FILES,   # noqa: E402
+                                           TAB_SESSION, MainWindow)
+from localclass.ui.app.style import DARK, LIGHT, qss   # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -110,6 +111,8 @@ def test_stale_card_disappears(qapp, gui):
 def test_create_lesson_switches_screen_and_roles(qapp, gui):
     node, bridge, win = gui("T")
     pump(qapp)
+    win.login_page.btn_teacher.click()
+    assert win.login_page.stack.currentIndex() == ROLE_TEACHER
     win.login_page.name_edit.setText("Мария")
     win.login_page.topic_edit.setText("Алгоритмы")
     win.login_page.create_pin.setText("4242")
@@ -214,7 +217,139 @@ def test_theme_switch_applies_stylesheet(qapp, gui):
     pump(qapp)
     win.apply_theme("dark")
     assert node.settings.theme == "dark"
-    assert "#171c22" in QApplication.instance().styleSheet()
+    assert DARK["bg"] in QApplication.instance().styleSheet()
     win.apply_theme("light")
     assert node.settings.theme == "light"
-    assert "#f4f6f9" in QApplication.instance().styleSheet()
+    assert LIGHT["bg"] in QApplication.instance().styleSheet()
+
+
+# ---------------------------------------------------------------- требования v1.3
+
+
+def test_role_switch_hides_create_block_from_student(qapp, gui):
+    """Блок «Создать урок» не виден ученику: он живёт на отдельной странице переключателя."""
+    node, bridge, win = gui("A")
+    pump(qapp)
+    lp = win.login_page
+    assert lp.stack.currentIndex() == ROLE_STUDENT, "по умолчанию активен экран ученика"
+    assert lp.btn_student.isChecked() and not lp.btn_teacher.isChecked()
+    teacher_page = lp.stack.widget(ROLE_TEACHER)
+    assert not teacher_page.isVisible(), "поля создания урока скрыты от ученика"
+    assert lp.code_edit.isVisibleTo(lp) and lp.code_btn.isVisibleTo(lp), "вход по коду доступен ученику"
+
+    lp.btn_teacher.click()
+    assert lp.stack.currentIndex() == ROLE_TEACHER
+    student_page = lp.stack.widget(ROLE_STUDENT)
+    assert not student_page.isVisible()
+    assert lp.topic_edit.isVisibleTo(teacher_page) and lp.create_pin.isVisibleTo(teacher_page)
+    assert lp.create_btn.text() == "Начать урок"
+
+
+def test_more_options_block_is_plain_widget_toggled_by_setvisible(qapp, gui):
+    """Вместо кастомного спойлера — обычный QWidget, видимость через setVisible."""
+    node, bridge, win = gui("A")
+    pump(qapp)
+    lp = win.login_page
+    assert lp.more_box.isHidden(), "блок скрыт по умолчанию"
+    lp.more_btn.click()
+    assert not lp.more_box.isHidden() and lp.more_box.isVisibleTo(lp)
+    lp.more_btn.click()
+    assert lp.more_box.isHidden()
+
+
+def test_every_tab_is_scrollable(qapp, gui):
+    """Каждая вкладка верхнего уровня обёрнута в QScrollArea без рамки (ТЗ v1.3, 1.4)."""
+    from PySide6.QtWidgets import QFrame, QScrollArea
+    node, bridge, win = gui("A")
+    pump(qapp)
+    for i in range(win.tabs.count()):
+        page = win.tabs.widget(i)
+        assert isinstance(page, QScrollArea), f"вкладка «{win.tabs.tabText(i)}» без прокрутки"
+        assert page.widgetResizable()
+        assert page.frameShape() == QFrame.NoFrame
+
+
+def test_no_fixed_sizes_in_ui_sources():
+    """Запрет жёстких размеров и абсолютных координат в UI-слое (ТЗ v1.3, 1.2)."""
+    import pathlib
+    import re as _re
+    banned = _re.compile(r"\.(setGeometry|setFixedWidth|setFixedHeight|setFixedSize|move)\(")
+    ui_dir = pathlib.Path(__file__).resolve().parent.parent / "localclass" / "ui"
+    offenders = []
+    for path in ui_dir.rglob("*.py"):
+        for num, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if banned.search(line) and "self.move(" not in line:   # move допустим только для тоста
+                offenders.append(f"{path.name}:{num}: {line.strip()}")
+    assert not offenders, "жёсткие размеры/координаты: " + "; ".join(offenders)
+
+
+def test_chat_input_row_proportions(qapp, gui):
+    """Скрепка квадратная 40×40, «Отправить» не меньше 100×40, поле ввода растягивается (ТЗ v1.3, 4.1)."""
+    node, bridge, win = gui("A")
+    pump(qapp)
+    win.login_page.name_edit.setText("Мария")
+    win.login_page.btn_teacher.click()
+    win.login_page.create_session()
+    wait_for(qapp, lambda: node.session_id is not None)
+    win.tabs.setCurrentIndex(TAB_CHAT)
+    pump(qapp, 0.4)
+    assert win.attach_btn.minimumWidth() >= 40 and win.attach_btn.minimumHeight() >= 40
+    assert win.attach_btn.width() == win.attach_btn.height(), "скрепка должна быть квадратной"
+    assert win.send_btn.minimumWidth() >= 100 and win.send_btn.minimumHeight() >= 40
+    assert win.msg_input.width() > win.send_btn.width(), "поле ввода занимает ширину между скрепкой и кнопкой"
+    links_panel = win.links_area.parentWidget()
+    assert links_panel.minimumWidth() >= 220, "минимальная ширина ленты ссылок — 220 px"
+
+
+def test_download_button_switches_to_open_after_receive(qapp, gui, tmp_path):
+    """Кнопка действия: [⬇ Скачать] для чужого файла и [📂 Открыть] для уже лежащего локально."""
+    node, bridge, win = gui("A")
+    pump(qapp)
+    win.login_page.name_edit.setText("Мария")
+    win.login_page.btn_teacher.click()
+    win.login_page.create_session()
+    wait_for(qapp, lambda: node.session_id is not None)
+    f = tmp_path / "конспект.pdf"
+    f.write_bytes(b"x" * 2048)
+    win.share_file(str(f))
+    wait_for(qapp, lambda: win.files_table.rowCount() == 1)
+    pump(qapp, 0.3)
+    holder = win.files_table.cellWidget(0, 3)
+    btn = holder.findChildren(type(win.send_btn))[0]
+    assert "Открыть" in btn.text(), "свой файл уже лежит локально — предлагаем открыть папку"
+
+    foreign = {"file_id": "fid-2", "session_id": node.session_id, "owner_id": "деврайс-другого-узла",
+               "channel": "general", "filename": "чужой.zip", "size": 1024, "chunk_size": 1024,
+               "chunk_count": 1, "full_sha256": "x" * 64, "lamport": 1, "timestamp": time.time(),
+               "local_path": None, "deleted": 0, "owner_name": "Пётр"}
+    widget = win._file_action_widget(foreign, None)
+    btn2 = widget.findChildren(type(win.send_btn))[0]
+    assert "Скачать" in btn2.text() or "нет в сети" in btn2.text()
+
+    active = {"transfer_id": "t1", "status": "active", "chunk_count": 4, "received_chunks": "03"}
+    widget3 = win._file_action_widget(foreign, active)
+    from PySide6.QtWidgets import QProgressBar
+    assert widget3.findChildren(QProgressBar), "во время загрузки показываем прогресс"
+
+
+def test_downloads_dir_defaults_to_user_downloads(tmp_path, monkeypatch):
+    """Принятые файлы по умолчанию идут в Downloads/LocalClass (ТЗ v1.3, 3.2)."""
+    from localclass.config import NodeConfig, Settings, default_downloads_dir
+    from localclass.core.node import Node
+    from localclass.testing.harness import free_port
+    monkeypatch.setenv("XDG_DOWNLOAD_DIR", str(tmp_path / "Загрузки"))
+    (tmp_path / "Загрузки").mkdir()
+    cfg = NodeConfig(data_dir=tmp_path / "node", device_label="", listen_port=free_port(),
+                     discovery_port=free_port(), dev_mode=False, enable_discovery=False)
+    settings = Settings.load(cfg.data_dir / "config" / "settings.json")
+    settings.enable_mdns = False
+    node = Node(cfg, settings)
+    try:
+        assert node.paths.files == default_downloads_dir()
+        assert node.paths.files.name == "LocalClass" and node.paths.files.parent == tmp_path / "Загрузки"
+        node.set_download_dir(str(tmp_path / "своя"))
+        assert node.paths.files == tmp_path / "своя"
+        node.set_download_dir("")      # «По умолчанию» снова ведёт в Загрузки
+        assert node.paths.files == default_downloads_dir()
+    finally:
+        node.store.close()

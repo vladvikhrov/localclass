@@ -52,10 +52,11 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
    git remote add origin git@github.com:<вы>/localclass.git && git push -u origin main
    ```
 2. Workflow `.github/workflows/build-windows.yml` при каждом push в `main` прогоняет тесты на Linux, затем на
-   `windows-latest` собирает `dist\LocalClass\` (PyInstaller), запускает smoke-тест exe, собирает установщик
-   Inno Setup и публикует артефакт **LocalClass-windows** (вкладка Actions → запуск → Artifacts):
-   `LocalClass-1.0.0-setup.exe` и `LocalClass-portable.zip`.
-3. `make release` — ставит тег `v1.0.0` и пушит его: workflow дополнительно создаст GitHub Release с этими файлами.
+   `windows-latest` собирает дистрибутив (PyInstaller), запускает smoke-тест exe, собирает установщик Inno Setup
+   и публикует **один** файл — `LocalClass-1.3.0-setup.exe` (вкладка Actions → запуск → Artifacts).
+3. `make release` — ставит тег `v1.3.0` и пушит его: workflow дополнительно создаёт GitHub **Release**.
+   Со страницы Releases установщик скачивается напрямую, без промежуточного zip — это самый удобный путь
+   раздать приложение классу.
 
 ### Вариант B — на любом Windows-ПК одной командой
 
@@ -66,8 +67,10 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-Результат: `dist\LocalClass\LocalClass.exe` (портативная версия, папку можно просто скопировать) и
-`dist\LocalClass-1.0.0-setup.exe` (установщик).
+Результат: `dist\LocalClass-1.3.0-setup.exe` (установщик — то, что раздаётся ученикам) и рабочая папка
+`dist\LocalClass\` с `LocalClass.exe`, если нужна версия без установки.
+В установщик попадает только `LocalClass.exe`: консольный `localclass-node.exe` нужен лишь для разработки
+и автотестов и в дистрибутив не включается.
 
 PyInstaller не умеет кросс-компилировать, поэтому сборка `.exe` на Linux невозможна — spec-файл
 `LocalClass.spec` проверен сборкой Linux-бинарников (тот же spec, те же hidden imports).

@@ -49,19 +49,13 @@ jobs:
         run: |
           $v = python -c "import localclass; print(localclass.__version__)"
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$v" installer\LocalClass.iss
-      - name: Portable zip
-        shell: pwsh
-        run: Compress-Archive -Path dist\LocalClass\* -DestinationPath dist\LocalClass-portable.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: LocalClass-windows
-          path: |
-            dist/*.exe
-            dist/LocalClass-portable.zip
+          name: LocalClass-setup          # единственный файл: установщик
+          path: dist/LocalClass-*-setup.exe
+          if-no-files-found: error
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*.exe
-            dist/LocalClass-portable.zip
+          files: dist/LocalClass-*-setup.exe

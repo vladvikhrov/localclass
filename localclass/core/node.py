@@ -13,7 +13,7 @@ from typing import Any
 
 from .. import __version__
 from ..bus import EventBus
-from ..config import Limits, NodeConfig, Paths, Settings
+from ..config import Limits, NodeConfig, Paths, Settings, default_downloads_dir
 from ..files.transfer import TransferManager
 from ..logs import EventLog, setup_app_logging
 from ..net import diagnostics
@@ -42,8 +42,7 @@ class Node:
         self.config = config
         self.paths = Paths(Path(config.data_dir).expanduser().resolve()).ensure()
         self.settings = settings or Settings.load(self.paths.settings_file)
-        if self.settings.download_dir:
-            self.paths.set_download_dir(self.settings.download_dir)
+        self._apply_download_dir()
         if config.listen_port is not None:
             self.settings.listen_port = config.listen_port
         if config.discovery_port is not None:
@@ -564,11 +563,29 @@ class Node:
         self.save_settings()
 
     def set_download_dir(self, path: str | None) -> None:
-        """Папка для принятых файлов. Пустое значение — хранилище по умолчанию внутри данных приложения."""
+        """Папка для принятых файлов. Пустое значение возвращает путь по умолчанию."""
         self.settings.download_dir = str(path or "")
         self.save_settings()
-        self.paths.set_download_dir(self.settings.download_dir)
+        self._apply_download_dir()
         log.info("папка для принятых файлов: %s", self.paths.files)
+
+    def _apply_download_dir(self) -> None:
+        """Выбранная пользователем папка, иначе «Загрузки» пользователя (ТЗ v1.3, 3.2).
+
+        В dev-режиме (несколько узлов на одном ПК) остаётся папка внутри данных узла, иначе файлы
+        разных экземпляров перемешались бы в одной системной папке «Загрузки».
+        """
+        if self.settings.download_dir:
+            self.paths.set_download_dir(self.settings.download_dir)
+            return
+        if self.config.dev_mode:
+            self.paths.set_download_dir("")
+            return
+        try:
+            self.paths.set_download_dir(str(default_downloads_dir()))
+        except OSError as e:
+            log.warning("не удалось создать папку загрузок: %s — используем хранилище приложения", e)
+            self.paths.set_download_dir("")
 
     def set_theme(self, theme: str) -> None:
         self.settings.theme = theme if theme in ("light", "dark") else "light"
