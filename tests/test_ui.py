@@ -346,23 +346,32 @@ def test_download_button_switches_to_open_after_receive(qapp, gui, tmp_path):
 
 
 def test_downloads_dir_defaults_to_user_downloads(tmp_path, monkeypatch):
-    """Принятые файлы по умолчанию идут в Downloads/LocalClass (ТЗ v1.3, 3.2)."""
+    """Принятые файлы по умолчанию идут в Downloads/LocalClass (ТЗ v1.3, 3.2).
+
+    Путь считает сама default_downloads_dir: на Windows — из реестра, на Linux — из XDG_DOWNLOAD_DIR,
+    поэтому тест сверяется с ней, а не с захардкоженным путём.
+    """
+    import sys as _sys
+
     from localclass.config import NodeConfig, Settings, default_downloads_dir
     from localclass.core.node import Node
     from localclass.testing.harness import free_port
-    monkeypatch.setenv("XDG_DOWNLOAD_DIR", str(tmp_path / "Загрузки"))
-    (tmp_path / "Загрузки").mkdir()
+    if _sys.platform != "win32":                       # на Linux подменяем системную папку загрузок
+        monkeypatch.setenv("XDG_DOWNLOAD_DIR", str(tmp_path / "Загрузки"))
+        (tmp_path / "Загрузки").mkdir()
+    expected = default_downloads_dir()
     cfg = NodeConfig(data_dir=tmp_path / "node", device_label="", listen_port=free_port(),
                      discovery_port=free_port(), dev_mode=False, enable_discovery=False)
     settings = Settings.load(cfg.data_dir / "config" / "settings.json")
     settings.enable_mdns = False
     node = Node(cfg, settings)
     try:
-        assert node.paths.files == default_downloads_dir()
-        assert node.paths.files.name == "LocalClass" and node.paths.files.parent == tmp_path / "Загрузки"
+        assert node.paths.files == expected
+        assert node.paths.files.name == "LocalClass"
+        assert node.paths.files.parent.name.lower() in ("downloads", "загрузки")
         node.set_download_dir(str(tmp_path / "своя"))
         assert node.paths.files == tmp_path / "своя"
-        node.set_download_dir("")      # «По умолчанию» снова ведёт в Загрузки
-        assert node.paths.files == default_downloads_dir()
+        node.set_download_dir("")      # «По умолчанию» снова ведёт в системные «Загрузки»
+        assert node.paths.files == expected
     finally:
         node.store.close()
