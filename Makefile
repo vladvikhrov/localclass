@@ -28,8 +28,13 @@ cluster:         ## 3 headless-узла в tmux
 cluster-gui: check-qt ## 3 GUI-узла на одном ПК
 	scripts/run_cluster.sh 3 --gui
 
-release:         ## отправить тег vX.Y.Z → GitHub Actions соберёт exe и установщик
-	@v=$$($(PY) -c "import localclass;print(localclass.__version__)"); git tag -a "v$$v" -m "LocalClass $$v" && git push origin "v$$v" && echo "тег v$$v отправлен — см. вкладку Actions/Releases"
+release:         ## выпустить версию: тег vX.Y.Z → GitHub Actions соберёт установщик и создаст Release
+	@test -z "$$(git status --porcelain)" || { echo "Есть незакоммиченные изменения — сначала коммит."; exit 1; }
+	@v=$$($(PY) -c "import localclass;print(localclass.__version__)"); \
+	git rev-parse "v$$v" >/dev/null 2>&1 && { echo "Тег v$$v уже существует: поднимите версию в localclass/__init__.py и pyproject.toml"; exit 1; } || true; \
+	git push origin main && git tag -a "v$$v" -m "LocalClass $$v" && git push origin "v$$v" && \
+	echo "Тег v$$v отправлен. Через ~10 минут установщик появится здесь:" && \
+	echo "  https://github.com/vladvikhrov/localclass/releases/tag/v$$v"
 
 clean:
 	rm -rf run build dist .pytest_cache; find . -name __pycache__ -type d -exec rm -rf {} +

@@ -54,9 +54,20 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 2. Workflow `.github/workflows/build-windows.yml` при каждом push в `main` прогоняет тесты на Linux, затем на
    `windows-latest` собирает дистрибутив (PyInstaller), запускает smoke-тест exe, собирает установщик Inno Setup
    и публикует **один** файл — `LocalClass-1.3.0-setup.exe` (вкладка Actions → запуск → Artifacts).
-3. `make release` — ставит тег `v1.3.0` и пушит его: workflow дополнительно создаёт GitHub **Release**.
-   Со страницы Releases установщик скачивается напрямую, без промежуточного zip — это самый удобный путь
-   раздать приложение классу.
+3. Готовый установщик лежит на странице **Releases**: https://github.com/vladvikhrov/localclass/releases —
+   скачивается напрямую, без промежуточного zip. Это самый удобный путь раздать приложение классу.
+
+### Выпуск следующей версии
+
+```bash
+# 1. поднять номер версии в localclass/__init__.py и pyproject.toml, закоммитить
+make release          # запушит main, поставит тег vX.Y.Z и запустит сборку
+```
+
+Доступ к GitHub уже настроен: deploy-ключ репозитория лежит в `~/.ssh/localclass_deploy`, в `~/.ssh/config`
+для него заведён отдельный хост `github-localclass` (чтобы не влиять на другие проекты), а `origin` указывает
+на `git@github-localclass:vladvikhrov/localclass.git`. Ключ даёт доступ только к этому репозиторию;
+отозвать его можно на странице Settings → Deploy keys.
 
 ### Вариант B — на любом Windows-ПК одной командой
 
