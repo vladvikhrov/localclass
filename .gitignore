@@ -1,9 +1,32 @@
+# окружение и сборка
 .venv/
 __pycache__/
 *.pyc
-run/
 build/
 dist/
 *.spec.bak
 .pytest_cache/
 *.egg-info/
+.idea/
+.vscode/
+
+# данные узла: базы, логи, настройки, принятые файлы и — главное — приватные ключи устройств.
+# Каталог run/ используется dev-режимом, но перечисляем и сами типы файлов: узел можно запустить
+# с --data в любой папке, и тогда одного run/ недостаточно.
+run/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+settings.json
+device.key
+*.pem
+*.key
+*.pfx
+*.p12
+.env
+incoming/
+storage/
+icons/

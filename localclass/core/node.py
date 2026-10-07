@@ -18,8 +18,8 @@ from ..files.transfer import TransferManager
 from ..logs import EventLog, setup_app_logging
 from ..net import diagnostics
 from ..net.discovery import Discovery
-from ..net.interfaces import (hostname, interface_key, list_interfaces, local_addresses,
-                              preferred_interface, virtual_interface_keys)
+from ..net.interfaces import (interface_key, list_interfaces, local_addresses, preferred_interface,
+                              virtual_interface_keys)
 from ..net.mesh import Mesh, PeerInfo
 from ..testing.faults import FaultInjector
 from .events import Event, EventType, new_id
@@ -35,6 +35,17 @@ log = logging.getLogger("localclass.core.node")
 
 class PermissionDenied(Exception):
     pass
+
+
+def default_display_name(device_id: str) -> str:
+    """Имя участника по умолчанию.
+
+    Раньше подставлялось имя компьютера (socket.gethostname()), а оно у многих содержит имя владельца
+    и модель ноутбука — и уходило в broadcast всему классу. Теперь это нейтральное имя с коротким
+    суффиксом device_id: участники различимы, личные данные не раскрываются. Настоящее имя
+    пользователь вводит сам на экране входа.
+    """
+    return f"Участник {device_id[:4]}"
 
 
 class Node:
@@ -54,7 +65,7 @@ class Node:
         self.identity = Identity.load_or_create(self.paths.key_file)
         self.device_id = self.identity.device_id
         if not self.settings.display_name:
-            self.settings.display_name = config.device_label or hostname()
+            self.settings.display_name = config.device_label or default_display_name(self.device_id)
         self.store = Store(self.paths.db_file, self.device_id)
         self.faults = FaultInjector()
         if not self.settings.interfaces_configured and not config.dev_mode:
@@ -559,7 +570,7 @@ class Node:
         return report
 
     def set_display_name(self, name: str) -> None:
-        self.settings.display_name = name.strip()[:64] or hostname()
+        self.settings.display_name = name.strip()[:64] or default_display_name(self.device_id)
         self.save_settings()
 
     def set_download_dir(self, path: str | None) -> None:

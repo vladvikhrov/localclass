@@ -7,16 +7,18 @@ name = "localclass"
 version = "1.3.0"
 description = "LocalClass — децентрализованный P2P-мессенджер и файлообменник для локальной сети"
 requires-python = ">=3.11"
+# Верхние границы закрывают следующую мажорную версию: сборка релиза не должна внезапно собраться
+# на API, которого ещё не существовало при тестировании. Поднимать границы — отдельным коммитом с прогоном тестов.
 dependencies = [
-    "cryptography>=42",
-    "zeroconf>=0.130",
-    "ifaddr>=0.2",
-    "qrcode>=7.4",
-    "PySide6>=6.6",
+    "cryptography>=42,<51",
+    "zeroconf>=0.130,<1.0",
+    "ifaddr>=0.2,<1.0",
+    "qrcode>=7.4,<9",
+    "PySide6>=6.6,<7",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "pyinstaller>=6.6"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.23,<2", "pyinstaller>=6.6,<7"]
 
 [project.scripts]
 localclass = "localclass.__main__:main"

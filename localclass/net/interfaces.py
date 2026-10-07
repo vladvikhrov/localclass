@@ -140,10 +140,3 @@ def local_addresses(include_loopback: bool = False, disabled: list[str] | None =
     gw = default_route_ip()
     ifaces.sort(key=lambda i: (i.ip != gw, i.loopback, bool(i.hint)))
     return [i.ip for i in ifaces]
-
-
-def hostname() -> str:
-    try:
-        return socket.gethostname()
-    except OSError:
-        return "pc"
