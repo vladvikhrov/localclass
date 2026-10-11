@@ -106,26 +106,35 @@ def default_route_ip() -> str:
 
 
 def preferred_interface(interfaces: list[Interface] | None = None) -> Interface | None:
-    """Интерфейс со шлюзом по умолчанию — то, что приложение выбирает автоматически."""
+    """Интерфейс со шлюзом по умолчанию — то, что приложение выбирает автоматически.
+
+    VPN с полным туннелем тоже забирает маршрут по умолчанию, но одноклассники за ним недоступны —
+    такой шлюз пропускаем и берём первый реальный адаптер (Wi-Fi/Ethernet).
+    """
     ifaces = interfaces if interfaces is not None else list_interfaces()
     ip = default_route_ip()
     if ip:
         for i in ifaces:
-            if i.ip == ip:
+            if i.ip == ip and not _is_virtual(i):
                 return i
     real = [i for i in ifaces if not i.loopback and not i.hint]
     return real[0] if real else (ifaces[0] if ifaces else None)
 
 
+def _is_virtual(i: Interface) -> bool:
+    return (i.hint in ("VirtualBox", "Docker", "VMware", "Hyper-V", "WSL")
+            or i.hint.startswith("VPN") or i.hint.startswith("APIPA"))
+
+
 def virtual_interface_keys(interfaces: list[Interface] | None = None) -> list[str]:
-    """Ключи виртуальных адаптеров (VirtualBox, Docker, Hyper-V, VMware, WSL, VPN) — мусор для discovery."""
+    """Ключи виртуальных адаптеров (VirtualBox, Docker, Hyper-V, VMware, WSL, VPN) и APIPA — мусор для discovery."""
     ifaces = interfaces if interfaces is not None else list_interfaces()
     preferred = preferred_interface(ifaces)
     out = []
     for i in ifaces:
         if i.loopback or (preferred and i.ip == preferred.ip):
             continue
-        if i.hint in ("VirtualBox", "Docker", "VMware", "Hyper-V", "WSL") or i.hint.startswith("VPN"):
+        if _is_virtual(i):
             out.append(interface_key(i))
     return out
 
@@ -138,5 +147,5 @@ def local_addresses(include_loopback: bool = False, disabled: list[str] | None =
     """
     ifaces = [i for i in list_interfaces(include_loopback, disabled) if i.enabled]
     gw = default_route_ip()
-    ifaces.sort(key=lambda i: (i.ip != gw, i.loopback, bool(i.hint)))
+    ifaces.sort(key=lambda i: (_is_virtual(i), i.ip != gw, i.loopback, bool(i.hint)))
     return [i.ip for i in ifaces]

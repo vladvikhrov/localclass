@@ -90,7 +90,7 @@ class Settings:
     advanced_logs: bool = False
     download_dir: str = ""              # пусто → storage/files внутри данных приложения
     theme: str = "light"                # light | dark
-    interfaces_configured: bool = False  # авто-выбор интерфейсов уже выполнялся
+    interfaces_rules: int = 0           # версия правил, по которым уже выполнен авто-выбор интерфейсов
     limits: Limits = field(default_factory=Limits)
 
     @classmethod

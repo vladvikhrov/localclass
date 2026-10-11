@@ -32,6 +32,9 @@ from .sync import Sync
 
 log = logging.getLogger("localclass.core.node")
 
+# Версия правил авто-выбора интерфейсов. 2: VPN со шлюзом по умолчанию и APIPA тоже отключаются.
+INTERFACE_RULES = 2
+
 
 class PermissionDenied(Exception):
     pass
@@ -68,9 +71,10 @@ class Node:
             self.settings.display_name = config.device_label or default_display_name(self.device_id)
         self.store = Store(self.paths.db_file, self.device_id)
         self.faults = FaultInjector()
-        if not self.settings.interfaces_configured and not config.dev_mode:
-            self.settings.interfaces_configured = True
-            self.auto_select_interfaces()   # первый запуск: шлюз по умолчанию, без виртуальных адаптеров
+        if self.settings.interfaces_rules < INTERFACE_RULES and not config.dev_mode:
+            # первый запуск или обновились правила: шлюз по умолчанию, без виртуальных адаптеров
+            self.settings.interfaces_rules = INTERFACE_RULES
+            self.auto_select_interfaces()
             self.save_settings()
         self.session_id: str | None = self.settings.current_session_id
         s = self.store.get_session(self.session_id) if self.session_id else None
@@ -221,7 +225,8 @@ class Node:
             text = f"{who}: {t} {p.get('display_name') or p.get('name') or p.get('channel') or ''}"
         else:
             text = f"{who}: {t}"
-        self.eventlog.write(t, text, category=cat, device_id=ev.device_id, event_id=ev.event_id)
+        # время самого события, а не приёма: история, пришедшая по sync, иначе вся помечается одной секундой
+        self.eventlog.write(t, text, category=cat, device_id=ev.device_id, event_id=ev.event_id, ts=ev.timestamp)
         if t == EventType.SESSION_CLOSED and not local:
             asyncio.create_task(self._on_remote_session_closed(ev.session_id))
         elif t == EventType.SESSION_CREATED and not local and self._pending_teacher_pin:
@@ -258,6 +263,7 @@ class Node:
         self.save_settings()
         await self.emit(EventType.SESSION_CREATED, s)
         await self.emit(EventType.USER_JOINED, {"display_name": self.display_name, "role": "teacher"})
+        await self.emit(EventType.CHANNEL_CREATED, {"channel": "task", "title": "Задания"})
         await self._session_changed()
         log.info("создан урок «%s», код %s, PIN задан: %s", s["name"], s["code"], bool(s["teacher_pin_hash"]))
         return self.current_session() or s

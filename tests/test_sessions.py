@@ -107,3 +107,15 @@ async def test_pin_hash_is_session_scoped():
     assert not check_pin("s1", "123", "")
     assert pin_hash("s1", "") == ""
     assert DEFAULT_PIN == "123"
+
+
+async def test_new_session_has_general_and_task_channels(cluster):
+    """Новый урок сразу содержит #general и #task, и ученики получают оба канала по sync."""
+    c = await cluster(["A", "B"])
+    s = await c.nodes["A"].create_session("Урок", 60)
+    c.session_id = s["session_id"]
+    await c.join_all()
+    await c.connect_all()
+    await c.wait_consistent()
+    for n in ("A", "B"):
+        assert [ch["name"] for ch in c.nodes[n].store.channels(c.session_id)] == ["general", "task"]

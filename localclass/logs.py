@@ -90,9 +90,9 @@ class EventLog:
         self._logger.handlers = [self._handler]
 
     def write(self, event_type: str, text: str, *, category: str = "chat",
-              device_id: str | None = None, event_id: str | None = None) -> None:
+              device_id: str | None = None, event_id: str | None = None, ts: float | None = None) -> None:
         item = {
-            "ts": time.time(), "type": event_type, "text": text, "category": category,
+            "ts": ts or time.time(), "type": event_type, "text": text, "category": category,
             "device_id": device_id, "event_id": event_id,
         }
         self.records.append(item)
